@@ -1,0 +1,79 @@
+[package]
+name = "dig-keystore"
+version = "0.1.0"
+edition = "2021"
+description = "Encrypted secret-key storage for DIG Network binaries (BLS signing + L1 wallet keys). AES-256-GCM + Argon2id, typed per-scheme magic files, zeroizing memory hygiene."
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/DIG-Network/dig-keystore"
+homepage = "https://github.com/DIG-Network/dig-keystore"
+documentation = "https://docs.rs/dig-keystore"
+readme = "README.md"
+keywords = ["dig-network", "keystore", "bls", "chia", "encryption"]
+categories = ["cryptography::cryptocurrencies"]
+
+[dependencies]
+# Chia ecosystem (maximally re-used per CRATES_SUMMARY.md)
+chia-bls = "0.26"
+
+# Encryption primitives
+aes-gcm = "0.10"
+argon2 = "0.5"
+zeroize = { version = "1.7", features = ["derive"] }
+
+# RNG
+rand_core = "0.6"
+rand_chacha = "0.3"
+
+# Utilities
+crc32fast = "1"
+thiserror = "1"
+hex = "0.4"
+parking_lot = "0.12"
+
+# Optional features
+zxcvbn = { version = "3", optional = true }
+
+[dev-dependencies]
+proptest = "1"
+tempfile = "3"
+rand = "0.8"
+
+[features]
+default = ["file-backend"]
+
+# Ships FileBackend (filesystem KeychainBackend).
+file-backend = []
+
+# Enables Password::strength via zxcvbn.
+password-strength = ["dep:zxcvbn"]
+
+# Exposes MemoryBackend + TEST_PASSWORD helpers for use in dependent crates' tests.
+testing = []
+
+# Import/export in Ethereum keystore v4 JSON format (EIP-2335).
+# Not implemented in v0.1; trait stubs exist.
+eip2335 = []
+
+# Import Chia `.keychain` files (seed-based).
+# Not implemented in v0.1; trait stubs exist.
+chia-keychain = []
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[[test]]
+name = "roundtrip"
+path = "tests/roundtrip.rs"
+
+[[test]]
+name = "wrong_password"
+path = "tests/wrong_password.rs"
+
+[[test]]
+name = "tamper"
+path = "tests/tamper.rs"
+
+[[test]]
+name = "vectors"
+path = "tests/vectors.rs"
