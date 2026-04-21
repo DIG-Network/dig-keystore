@@ -365,7 +365,7 @@ dependencies = [
 
 [[package]]
 name = "dig-keystore"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "aes-gcm",
  "argon2",

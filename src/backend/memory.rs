@@ -1,6 +1,15 @@
-//! In-memory backend for tests.
+//! In-memory backend.
 //!
-//! Available only with the `testing` feature. Stores blobs in a `Mutex<HashMap>`.
+//! Originally feature-gated behind `testing`. As of v0.1.2 it is compiled
+//! unconditionally because production adapters in other crates (notably
+//! `dig-l1-wallet`'s `encryption.rs`) use it as a scratch backend to reuse
+//! the full keystore file format without touching the filesystem. The
+//! `testing` module still re-exports it for discoverability in dependent
+//! crates' dev-dependencies.
+//!
+//! Stores blobs in a `parking_lot::Mutex<HashMap>`. Legitimate production
+//! uses: encrypt-to-bytes / decrypt-from-bytes helpers; unit tests; doc
+//! examples.
 
 use std::collections::HashMap;
 
@@ -9,10 +18,15 @@ use parking_lot::Mutex;
 use crate::backend::{BackendKey, KeychainBackend};
 use crate::error::{KeystoreError, Result};
 
-/// A keychain backend that lives entirely in process memory. Cloneable (the
-/// clone shares state via an `Arc`-like internal handle).
+/// A keychain backend that lives entirely in process memory.
 ///
-/// Only compiled under the `testing` feature — **do not** use in production.
+/// Legitimate uses:
+/// - **Scratch backend** for bytes-in / bytes-out adapters (e.g.
+///   `dig-l1-wallet::keystore::encryption::encrypt_secret_key`).
+/// - **Tests and doc examples** where touching the filesystem is overhead.
+///
+/// Do **not** use this as the storage medium for a long-lived keystore —
+/// process exit drops all state.
 #[derive(Default)]
 pub struct MemoryBackend {
     inner: Mutex<HashMap<BackendKey, Vec<u8>>>,
