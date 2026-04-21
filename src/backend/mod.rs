@@ -10,12 +10,14 @@ use crate::error::Result;
 
 #[cfg(feature = "file-backend")]
 mod file;
-#[cfg(feature = "testing")]
 mod memory;
 
 #[cfg(feature = "file-backend")]
 pub use file::FileBackend;
-#[cfg(feature = "testing")]
+/// In-memory backend — always available. Originally feature-gated, now
+/// unconditional because production adapters (e.g., `dig-l1-wallet`'s
+/// encrypt/decrypt-bytes helpers) wrap it in scratch backends to reuse the
+/// full keystore format without touching the filesystem.
 pub use memory::MemoryBackend;
 
 /// An opaque key identifying a single encrypted blob within a backend.

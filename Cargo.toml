@@ -1,6 +1,6 @@
 [package]
 name = "dig-keystore"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Encrypted secret-key storage for DIG Network binaries (BLS signing + L1 wallet keys). AES-256-GCM + Argon2id, typed per-scheme magic files, zeroizing memory hygiene."
 license = "Apache-2.0 OR MIT"

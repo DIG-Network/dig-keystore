@@ -72,7 +72,6 @@ mod signer;
 
 #[cfg(feature = "file-backend")]
 pub use backend::FileBackend;
-#[cfg(feature = "testing")]
 pub use backend::MemoryBackend;
 pub use backend::{BackendKey, KeychainBackend};
 
