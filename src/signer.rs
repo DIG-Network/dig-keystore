@@ -46,6 +46,42 @@ impl<K: KeyScheme> SignerHandle<K> {
     pub fn try_sign(&self, msg: &[u8]) -> Result<K::Signature> {
         K::sign(&self.secret, msg)
     }
+
+    /// Borrow the raw secret bytes.
+    ///
+    /// # ⚠️ Danger
+    ///
+    /// Prefer [`sign`](Self::sign) whenever possible. This method exists for
+    /// a narrow class of consumers — hierarchical-deterministic (HD) wallets
+    /// and key-derivation libraries — that need the raw seed bytes to
+    /// derive child keys (e.g.
+    /// [`chia_bls::DerivableKey::derive_unhardened`](https://docs.rs/chia-bls)).
+    /// These callers cannot use [`sign`](Self::sign) because they need the
+    /// `SecretKey` itself, not a signature.
+    ///
+    /// The returned slice is borrowed from the handle's internal
+    /// `Zeroizing<Vec<u8>>`, so it wipes automatically when the handle
+    /// drops. **Callers must not copy the bytes into a non-zeroizing
+    /// buffer** without re-wrapping them — doing so would leave the secret
+    /// on the heap past the end of its intended lifetime.
+    ///
+    /// Typical usage:
+    ///
+    /// ```no_run
+    /// # use dig_keystore::{scheme::L1WalletBls, SignerHandle};
+    /// # fn get_signer() -> SignerHandle<L1WalletBls> { unimplemented!() }
+    /// let signer = get_signer();
+    /// let master_sk = chia_bls::SecretKey::from_seed(signer.expose_secret());
+    /// // `master_sk` is now the chia-bls master key; HD-derive as needed.
+    /// ```
+    ///
+    /// If you catch yourself writing `signer.expose_secret().to_vec()` or
+    /// `let copy = signer.expose_secret().to_owned();`, stop and consider
+    /// whether you really need to own the bytes — and if so, wrap the copy
+    /// in `Zeroizing::<Vec<u8>>::from(...)`.
+    pub fn expose_secret(&self) -> &[u8] {
+        &self.secret
+    }
 }
 
 impl<K: KeyScheme> Clone for SignerHandle<K> {
@@ -72,7 +108,8 @@ impl<K: KeyScheme> std::fmt::Debug for SignerHandle<K> {
 }
 
 // Explicitly NOT implementing AsRef<[u8]>, Deref, or into_raw() on SignerHandle.
-// The secret never leaves the handle by design.
+// The secret never leaves the handle by default; `expose_secret` is the one
+// deliberate, clearly-named opt-out for HD-wallet consumers.
 
 #[cfg(test)]
 mod tests {
@@ -140,5 +177,49 @@ mod tests {
         let s1 = h1.sign(b"x");
         let s2 = h2.sign(b"x");
         assert_eq!(s1.to_bytes(), s2.to_bytes());
+    }
+
+    /// **Proves:** `expose_secret` returns the exact seed bytes that were
+    /// used to construct the handle — byte-for-byte equality.
+    ///
+    /// **Why it matters:** HD-wallet consumers (`dig-l1-wallet`, future
+    /// `apps/wallet`) need the raw seed to feed `chia_bls::SecretKey::from_seed`
+    /// and derive child keys. If `expose_secret` ever returned a transformed
+    /// value (e.g., the derived master `SecretKey` serialised), HD derivation
+    /// in dependent crates would silently produce the wrong child addresses.
+    ///
+    /// **Catches:** a regression that hashes / transforms the secret before
+    /// returning; a bug where `expose_secret` borrows the public key
+    /// instead of the private seed.
+    #[test]
+    fn expose_secret_returns_original_bytes() {
+        let bytes = [0x77u8; 32];
+        let secret = Zeroizing::new(bytes.to_vec());
+        let public = BlsSigning::public_key(&secret).unwrap();
+        let handle: SignerHandle<BlsSigning> = SignerHandle::from_parts(secret, public);
+        assert_eq!(handle.expose_secret(), &bytes);
+    }
+
+    /// **Proves:** the byte slice returned by `expose_secret` is tied to the
+    /// handle's lifetime — once the handle is dropped, the borrow must end.
+    ///
+    /// **Why it matters:** This is really a compile-time property of the
+    /// borrow checker rather than a runtime assertion. The test exists to
+    /// document the intended lifetime contract and to break if someone
+    /// "helpfully" changes the return type to `Vec<u8>` (owned).
+    ///
+    /// **Catches:** a signature change to `expose_secret(&self) -> Vec<u8>`
+    /// that would leak the secret on drop of the returned vec.
+    #[test]
+    fn expose_secret_borrow_scoped_to_handle() {
+        let secret = Zeroizing::new(vec![0x22u8; 32]);
+        let public = BlsSigning::public_key(&secret).unwrap();
+        let handle: SignerHandle<BlsSigning> = SignerHandle::from_parts(secret, public);
+        let borrowed: &[u8] = handle.expose_secret();
+        assert_eq!(borrowed.len(), 32);
+        // The borrow would be rejected by the compiler if `handle` were dropped
+        // before `borrowed` — which is the property we want.
+        drop(handle);
+        // borrowed is now invalid and can't be touched; the compiler proves this.
     }
 }
