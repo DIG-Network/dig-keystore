@@ -70,24 +70,24 @@ mod signer;
 
 // Re-exports — the public surface.
 
-pub use backend::{BackendKey, KeychainBackend};
 #[cfg(feature = "file-backend")]
 pub use backend::FileBackend;
 #[cfg(feature = "testing")]
 pub use backend::MemoryBackend;
+pub use backend::{BackendKey, KeychainBackend};
 
 pub use error::{KeystoreError, Result};
-pub use format::{KdfId, KdfParams, KeystoreHeader, CipherId, FORMAT_VERSION_V1};
+pub use format::{CipherId, KdfId, KdfParams, KeystoreHeader, FORMAT_VERSION_V1};
 pub use keystore::Keystore;
 pub use password::Password;
-pub use scheme::{KeyScheme, BlsSigning, L1WalletBls};
+pub use scheme::{BlsSigning, KeyScheme, L1WalletBls};
 pub use signer::SignerHandle;
 
 // chia-bls re-exports so consumers don't need a direct dependency for simple cases.
 pub mod bls {
     //! Convenience re-exports of the `chia-bls` types used by the BLS schemes.
-    pub use chia_bls::{PublicKey, SecretKey, Signature};
     pub use chia_bls::{sign, verify};
+    pub use chia_bls::{PublicKey, SecretKey, Signature};
 }
 
 #[cfg(feature = "testing")]

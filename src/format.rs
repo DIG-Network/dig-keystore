@@ -81,7 +81,7 @@ pub(crate) const HEADER_SIZE: usize = 6 // magic
     + 16 // salt
     + 12 // nonce
     + 4; // payload len
-// 53 bytes total.
+         // 53 bytes total.
 
 /// Footer (CRC32) size.
 pub(crate) const FOOTER_SIZE: usize = 4;
@@ -412,7 +412,10 @@ mod tests {
         let mut h = sample_header();
         h.format_version = 999;
         let err = KeystoreHeader::decode(&h.encode()).unwrap_err();
-        assert!(matches!(err, KeystoreError::UnsupportedFormat { found: 999 }));
+        assert!(matches!(
+            err,
+            KeystoreError::UnsupportedFormat { found: 999 }
+        ));
     }
 
     /// **Proves:** the KDF-id byte at offset 10 is checked — writing `0xFF`

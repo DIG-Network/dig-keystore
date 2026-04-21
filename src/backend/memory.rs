@@ -27,14 +27,12 @@ impl MemoryBackend {
 
 impl KeychainBackend for MemoryBackend {
     fn read(&self, key: &BackendKey) -> Result<Vec<u8>> {
-        self.inner
-            .lock()
-            .get(key)
-            .cloned()
-            .ok_or_else(|| KeystoreError::from(std::io::Error::new(
+        self.inner.lock().get(key).cloned().ok_or_else(|| {
+            KeystoreError::from(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("key not found: {key}"),
-            )))
+            ))
+        })
     }
 
     fn write(&self, key: &BackendKey, data: &[u8]) -> Result<()> {

@@ -66,7 +66,9 @@ use zeroize::Zeroizing;
 use crate::backend::{BackendKey, KeychainBackend};
 use crate::cipher;
 use crate::error::{KeystoreError, Result};
-use crate::format::{encode_file, decode_file, KdfParams, KeystoreHeader, FORMAT_VERSION_V1, CipherId};
+use crate::format::{
+    decode_file, encode_file, CipherId, KdfParams, KeystoreHeader, FORMAT_VERSION_V1,
+};
 use crate::kdf;
 use crate::password::Password;
 use crate::scheme::KeyScheme;
@@ -181,8 +183,7 @@ impl<K: KeyScheme> Keystore<K> {
 
         let enc_key = kdf::derive_key(password.as_bytes(), &header.salt, &header.kdf)?;
         let header_bytes = header.encode();
-        let ciphertext_and_tag =
-            cipher::encrypt(&enc_key, &header.nonce, &secret, &header_bytes)?;
+        let ciphertext_and_tag = cipher::encrypt(&enc_key, &header.nonce, &secret, &header_bytes)?;
         debug_assert_eq!(
             ciphertext_and_tag.len() as u32,
             header.payload_len,
@@ -278,12 +279,8 @@ impl<K: KeyScheme> Keystore<K> {
         }
 
         let enc_key = kdf::derive_key(password.as_bytes(), &header.salt, &header.kdf)?;
-        let plaintext = cipher::decrypt(
-            &enc_key,
-            &header.nonce,
-            &ciphertext_and_tag,
-            &header_bytes,
-        )?;
+        let plaintext =
+            cipher::decrypt(&enc_key, &header.nonce, &ciphertext_and_tag, &header_bytes)?;
 
         if plaintext.len() != K::SECRET_LEN {
             return Err(KeystoreError::InvalidPlaintext {

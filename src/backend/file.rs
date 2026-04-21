@@ -402,7 +402,10 @@ mod tests {
         be.write(&BackendKey::new("beta"), b"b").unwrap();
         let mut keys = be.list("alph").unwrap();
         keys.sort_by_key(|k| k.0.clone());
-        assert_eq!(keys, vec![BackendKey::new("alpha"), BackendKey::new("alpha2")]);
+        assert_eq!(
+            keys,
+            vec![BackendKey::new("alpha"), BackendKey::new("alpha2")]
+        );
     }
 
     /// **Proves:** reading a non-existent key returns a `KeystoreError::Backend`

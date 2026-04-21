@@ -159,7 +159,9 @@ pub enum KeystoreError {
     /// Indicates a truncated file (disk full mid-write, network transfer cut,
     /// etc). Should be rare since we write files atomically via rename, but
     /// guard anyway.
-    #[error("file truncated (header claims {claimed} byte payload, only {available} bytes available)")]
+    #[error(
+        "file truncated (header claims {claimed} byte payload, only {available} bytes available)"
+    )]
     Truncated {
         /// Bytes claimed by the header.
         claimed: usize,
