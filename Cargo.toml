@@ -65,15 +65,19 @@ missing_docs = "warn"
 [[test]]
 name = "roundtrip"
 path = "tests/roundtrip.rs"
+required-features = ["testing"]
 
 [[test]]
 name = "wrong_password"
 path = "tests/wrong_password.rs"
+required-features = ["testing"]
 
 [[test]]
 name = "tamper"
 path = "tests/tamper.rs"
+required-features = ["testing"]
 
 [[test]]
 name = "vectors"
 path = "tests/vectors.rs"
+required-features = ["testing"]

@@ -63,7 +63,10 @@ impl<K: KeyScheme> std::fmt::Debug for SignerHandle<K> {
         f.debug_struct("SignerHandle")
             .field("scheme", &K::NAME)
             .field("public", &self.public)
-            .field("secret", &format_args!("<{} bytes zeroized>", self.secret.len()))
+            .field(
+                "secret",
+                &format_args!("<{} bytes zeroized>", self.secret.len()),
+            )
             .finish()
     }
 }

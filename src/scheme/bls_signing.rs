@@ -107,6 +107,12 @@ mod tests {
     #[test]
     fn wrong_seed_length_errors() {
         let err = BlsSigning::public_key(&[0u8; 16]).unwrap_err();
-        assert!(matches!(err, KeystoreError::InvalidPlaintext { expected: 32, got: 16 }));
+        assert!(matches!(
+            err,
+            KeystoreError::InvalidPlaintext {
+                expected: 32,
+                got: 16
+            }
+        ));
     }
 }

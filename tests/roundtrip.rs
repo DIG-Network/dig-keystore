@@ -81,14 +81,8 @@ fn l1_wallet_bls_roundtrip() {
     let key = BackendKey::new("l1_wallet");
     let password = Password::from("another password");
 
-    let ks = Keystore::<L1WalletBls>::create(
-        backend,
-        key,
-        password.clone(),
-        None,
-        fast_params(),
-    )
-    .expect("create");
+    let ks = Keystore::<L1WalletBls>::create(backend, key, password.clone(), None, fast_params())
+        .expect("create");
 
     let signer = ks.unlock(password).expect("unlock");
     let sig = signer.sign(b"test");
@@ -124,10 +118,7 @@ fn caller_supplied_seed() {
     .unwrap();
 
     let signer = ks.unlock(Password::from("pw")).unwrap();
-    assert_eq!(
-        signer.public_key().to_bytes(),
-        pubkey_before.to_bytes(),
-    );
+    assert_eq!(signer.public_key().to_bytes(), pubkey_before.to_bytes(),);
 }
 
 /// **Proves:** `change_password` re-encrypts the ciphertext under the new
@@ -148,19 +139,11 @@ fn change_password_preserves_secret() {
     let backend: Arc<dyn KeychainBackend> = Arc::new(MemoryBackend::new());
     let key = BackendKey::new("k");
 
-    let mut ks = Keystore::<BlsSigning>::create(
-        backend,
-        key,
-        Password::from("old"),
-        None,
-        fast_params(),
-    )
-    .unwrap();
+    let mut ks =
+        Keystore::<BlsSigning>::create(backend, key, Password::from("old"), None, fast_params())
+            .unwrap();
 
-    let sig_before = ks
-        .unlock(Password::from("old"))
-        .unwrap()
-        .sign(b"persist");
+    let sig_before = ks.unlock(Password::from("old")).unwrap().sign(b"persist");
 
     ks.change_password(Password::from("old"), Password::from("new"))
         .unwrap();
@@ -171,10 +154,7 @@ fn change_password_preserves_secret() {
         Err(dig_keystore::KeystoreError::DecryptFailed)
     ));
 
-    let sig_after = ks
-        .unlock(Password::from("new"))
-        .unwrap()
-        .sign(b"persist");
+    let sig_after = ks.unlock(Password::from("new")).unwrap().sign(b"persist");
 
     assert_eq!(sig_before.to_bytes(), sig_after.to_bytes());
 }
@@ -197,14 +177,9 @@ fn rotate_kdf_preserves_secret() {
     let backend: Arc<dyn KeychainBackend> = Arc::new(MemoryBackend::new());
     let key = BackendKey::new("k");
 
-    let mut ks = Keystore::<BlsSigning>::create(
-        backend,
-        key,
-        Password::from("pw"),
-        None,
-        fast_params(),
-    )
-    .unwrap();
+    let mut ks =
+        Keystore::<BlsSigning>::create(backend, key, Password::from("pw"), None, fast_params())
+            .unwrap();
 
     let sig_before = ks.unlock(Password::from("pw")).unwrap().sign(b"x");
 
@@ -247,14 +222,9 @@ fn create_refuses_overwrite() {
     )
     .unwrap();
 
-    let err = Keystore::<BlsSigning>::create(
-        backend,
-        key,
-        Password::from("pw"),
-        None,
-        fast_params(),
-    )
-    .unwrap_err();
+    let err =
+        Keystore::<BlsSigning>::create(backend, key, Password::from("pw"), None, fast_params())
+            .unwrap_err();
 
     assert!(matches!(err, dig_keystore::KeystoreError::AlreadyExists(_)));
 }
@@ -275,14 +245,9 @@ fn cached_public_key_populated_after_unlock() {
     let backend: Arc<dyn KeychainBackend> = Arc::new(MemoryBackend::new());
     let key = BackendKey::new("k");
 
-    let ks = Keystore::<BlsSigning>::create(
-        backend,
-        key,
-        Password::from("pw"),
-        None,
-        fast_params(),
-    )
-    .unwrap();
+    let ks =
+        Keystore::<BlsSigning>::create(backend, key, Password::from("pw"), None, fast_params())
+            .unwrap();
 
     // Immediately after create, the public key is cached.
     assert!(ks.cached_public_key().is_some());
