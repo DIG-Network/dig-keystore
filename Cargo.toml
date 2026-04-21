@@ -10,6 +10,18 @@ documentation = "https://docs.rs/dig-keystore"
 readme = "README.md"
 keywords = ["dig-network", "keystore", "bls", "chia", "encryption"]
 categories = ["cryptography::cryptocurrencies"]
+# Only ship the library surface to crates.io. Explicit allow-list because the
+# repo also tracks build artefacts (target/) and CI workflow files that must
+# NOT end up in the published tarball — crates.io rejects > 10 MiB uploads.
+include = [
+    "src/**/*.rs",
+    "tests/**/*.rs",
+    "docs/resources/SPEC.md",
+    "Cargo.toml",
+    "Cargo.lock",
+    "README.md",
+    "LICENSE*",
+]
 
 [dependencies]
 # Chia ecosystem (maximally re-used per CRATES_SUMMARY.md)
