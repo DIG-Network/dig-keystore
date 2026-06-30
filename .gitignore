@@ -2,6 +2,11 @@
 /target/
 **/*.rs.bk
 
+# Coverage output (cargo-llvm-cov)
+/lcov.info
+/*.profraw
+/*.profdata
+
 # Editor / IDE
 .idea/
 *.iml
