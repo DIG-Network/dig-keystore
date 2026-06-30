@@ -229,4 +229,65 @@ mod tests {
         let p2 = p1.clone();
         assert_eq!(p1.as_bytes(), p2.as_bytes());
     }
+
+    /// **Proves:** the four `From` constructors (`&str`, `String`, `&[u8]`,
+    /// `Vec<u8>`) all produce a `Password` whose bytes equal the input — the
+    /// owning variants (`String`, `Vec<u8>`) preserve the bytes exactly while
+    /// transferring ownership into the zeroizing buffer.
+    ///
+    /// **Why it matters:** Callers reach for whichever conversion their source
+    /// type makes convenient (a CLI prompt yields `String`; a key-file read
+    /// yields `Vec<u8>`). All paths must hash to the same bytes, otherwise a
+    /// password set via one constructor could fail to unlock a keystore that was
+    /// created via another. The `String`/`Vec` impls take a separate
+    /// single-allocation code path (no intermediate copy) that the borrowing
+    /// impls don't exercise.
+    ///
+    /// **Catches:** an owning `From` that truncates, re-encodes, or otherwise
+    /// transforms the moved buffer instead of wrapping it verbatim.
+    #[test]
+    fn all_from_impls_preserve_bytes() {
+        let expected = b"correct horse";
+        assert_eq!(Password::from("correct horse").as_bytes(), expected);
+        assert_eq!(
+            Password::from(String::from("correct horse")).as_bytes(),
+            expected
+        );
+        assert_eq!(
+            Password::from(b"correct horse".as_slice()).as_bytes(),
+            expected
+        );
+        assert_eq!(
+            Password::from(b"correct horse".to_vec()).as_bytes(),
+            expected
+        );
+
+        // Non-UTF-8 bytes survive the byte-oriented constructors unchanged.
+        let raw = vec![0xFF, 0x00, 0xFE];
+        assert_eq!(Password::from(raw.clone()).as_bytes(), raw.as_slice());
+        assert_eq!(Password::from(raw.as_slice()).as_bytes(), raw.as_slice());
+    }
+
+    /// **Proves:** with the `password-strength` feature enabled, `strength()`
+    /// scores a weak password lower than a strong one, and a non-UTF-8 password
+    /// is scored conservatively (as the empty string) rather than panicking.
+    ///
+    /// **Why it matters:** `strength()` backs CLI "your password is weak"
+    /// prompts. It must (a) actually discriminate weak from strong, and (b) never
+    /// panic on arbitrary bytes — `Password` accepts non-UTF-8 input, and the
+    /// strength helper has to degrade gracefully (it lossily decodes to `""`).
+    ///
+    /// **Catches:** a regression that `unwrap()`s the UTF-8 decode (panicking on
+    /// non-UTF-8 bytes), or one that returns a constant score regardless of input.
+    #[cfg(feature = "password-strength")]
+    #[test]
+    fn strength_discriminates_and_tolerates_non_utf8() {
+        let weak = Password::from("aaaaaaaa");
+        let strong = Password::from("9!Kp$3vQ_z@Wm2#L");
+        assert!(weak.strength().score() < strong.strength().score());
+
+        // Invalid UTF-8 must not panic; it is scored as the empty string.
+        let non_utf8 = Password::from(vec![0xFF, 0xFE, 0xFD]);
+        let _ = non_utf8.strength(); // reaching here without a panic is the assertion
+    }
 }

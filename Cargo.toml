@@ -93,3 +93,8 @@ required-features = ["testing"]
 name = "vectors"
 path = "tests/vectors.rs"
 required-features = ["testing"]
+
+[[test]]
+name = "keystore_branches"
+path = "tests/keystore_branches.rs"
+required-features = ["testing"]

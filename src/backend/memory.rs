@@ -102,4 +102,96 @@ mod tests {
         be.delete(&k).unwrap();
         assert!(!be.exists(&k).unwrap());
     }
+
+    /// **Proves:** reading a key that was never written returns a
+    /// [`KeystoreError::Backend`] whose inner `io::Error` is
+    /// [`ErrorKind::NotFound`].
+    ///
+    /// **Why it matters:** The exact error *kind* is load-bearing — the default
+    /// [`KeychainBackend::exists`] and `Keystore::create`'s overwrite guard both
+    /// branch on `NotFound` specifically. If `MemoryBackend::read` reported a
+    /// missing key as some other error kind, callers that wrap it (e.g.
+    /// `dig-l1-wallet`'s scratch-backend decrypt path) would treat "absent" as a
+    /// hard failure.
+    ///
+    /// **Catches:** a regression that returns a generic/`Other` error, or that
+    /// returns `Ok(empty)` for a missing key.
+    #[test]
+    fn read_missing_key_is_not_found() {
+        let be = MemoryBackend::new();
+        let err = be.read(&BackendKey::new("absent")).unwrap_err();
+        match err {
+            KeystoreError::Backend(io) => {
+                assert_eq!(io.kind(), std::io::ErrorKind::NotFound);
+            }
+            other => panic!("expected Backend(NotFound), got {other:?}"),
+        }
+    }
+
+    /// **Proves:** `write` to an existing key overwrites in place — a later
+    /// `read` sees the new bytes, never a concatenation or the stale value.
+    ///
+    /// **Why it matters:** Password rotation and KDF rotation re-`write` the
+    /// same backend key with fresh ciphertext. If `MemoryBackend` appended or
+    /// kept the old value, an `unlock` after rotation would decrypt stale
+    /// ciphertext with the new key and fail.
+    ///
+    /// **Catches:** a `write` that uses `entry().or_insert` (ignoring updates)
+    /// or otherwise fails to replace the prior blob.
+    #[test]
+    fn write_overwrites_in_place() {
+        let be = MemoryBackend::new();
+        let k = BackendKey::new("k");
+        be.write(&k, b"first").unwrap();
+        be.write(&k, b"second").unwrap();
+        assert_eq!(be.read(&k).unwrap(), b"second");
+    }
+
+    /// **Proves:** `list` returns exactly the keys whose name starts with the
+    /// given prefix, and an empty prefix lists everything.
+    ///
+    /// **Why it matters:** Callers enumerate keystores by prefix (e.g. listing
+    /// all `validator/` keys). A prefix filter that matched substrings anywhere,
+    /// or ignored the prefix entirely, would surface unrelated keys to the
+    /// operator.
+    ///
+    /// **Catches:** using `contains` instead of `starts_with`; returning all
+    /// keys regardless of prefix.
+    #[test]
+    fn list_filters_by_prefix() {
+        let be = MemoryBackend::new();
+        be.write(&BackendKey::new("validator/a"), b"1").unwrap();
+        be.write(&BackendKey::new("validator/b"), b"2").unwrap();
+        be.write(&BackendKey::new("wallet/c"), b"3").unwrap();
+
+        let mut matched: Vec<String> = be
+            .list("validator/")
+            .unwrap()
+            .into_iter()
+            .map(|k| k.as_str().to_string())
+            .collect();
+        matched.sort();
+        assert_eq!(matched, vec!["validator/a", "validator/b"]);
+
+        // An empty prefix matches every key.
+        assert_eq!(be.list("").unwrap().len(), 3);
+        // A non-matching prefix yields nothing.
+        assert!(be.list("none/").unwrap().is_empty());
+    }
+
+    /// **Proves:** `MemoryBackend::default()` produces an empty backend
+    /// equivalent to `new()`.
+    ///
+    /// **Why it matters:** Production adapters construct the scratch backend via
+    /// `MemoryBackend::default()` (it derives `Default`). An accidental
+    /// non-empty or mis-initialised `Default` would leak state between
+    /// independent encrypt/decrypt operations.
+    ///
+    /// **Catches:** a hand-written `Default` that pre-populates the map.
+    #[test]
+    fn default_is_empty() {
+        let be = MemoryBackend::default();
+        assert!(be.list("").unwrap().is_empty());
+        assert!(!be.exists(&BackendKey::new("anything")).unwrap());
+    }
 }
