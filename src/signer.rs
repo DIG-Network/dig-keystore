@@ -157,6 +157,31 @@ mod tests {
         assert!(chia_bls::verify(&sig, &public, b"message"));
     }
 
+    /// **Proves:** `try_sign` returns `Ok(sig)` for a valid handle and the
+    /// signature it produces verifies under the handle's public key — i.e. the
+    /// fallible signing path is equivalent to the panicking [`sign`](super::SignerHandle::sign).
+    ///
+    /// **Why it matters:** `try_sign` is the non-panicking entry point for
+    /// callers that prefer to surface scheme-level errors as `Result` rather
+    /// than unwind. Because a `SignerHandle` always holds a length-validated
+    /// secret, `try_sign` must succeed here; the test pins that the `Ok` arm is
+    /// reached and yields a real, verifiable signature (not a default/empty one).
+    ///
+    /// **Catches:** a `try_sign` that forwards the wrong secret/message, or that
+    /// erroneously returns `Err` for a well-formed handle.
+    #[test]
+    fn try_sign_succeeds_and_verifies() {
+        let secret = Zeroizing::new(vec![0x33u8; 32]);
+        let public = BlsSigning::public_key(&secret).unwrap();
+        let handle: SignerHandle<BlsSigning> = SignerHandle::from_parts(secret, public);
+        let sig = handle
+            .try_sign(b"payload")
+            .expect("try_sign should succeed");
+        assert!(chia_bls::verify(&sig, &public, b"payload"));
+        // try_sign and sign agree byte-for-byte.
+        assert_eq!(sig.to_bytes(), handle.sign(b"payload").to_bytes());
+    }
+
     /// **Proves:** cloning a `SignerHandle` yields an independent copy that
     /// produces the exact same signature as the original.
     ///

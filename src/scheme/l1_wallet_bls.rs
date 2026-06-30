@@ -101,4 +101,39 @@ mod tests {
         let sig = L1WalletBls::sign(&seed, b"hi").unwrap();
         assert!(chia_bls::verify(&sig, &pk, b"hi"));
     }
+
+    /// **Proves:** both `public_key` and `sign` reject a secret whose length is
+    /// not [`L1WalletBls::SECRET_LEN`], returning
+    /// [`KeystoreError::InvalidPlaintext`] with the expected/got lengths — and
+    /// do so **without panicking** (the [`crate::scheme::KeyScheme`] contract
+    /// forbids panicking on malformed input).
+    ///
+    /// **Why it matters:** A wrong-length seed reaching `SecretKey::from_seed`
+    /// is exactly the kind of malformed input that could come from a corrupt
+    /// keystore file or a truncated import. The scheme must surface it as a typed
+    /// error the keystore layer can report, not crash the validator/wallet
+    /// binary.
+    ///
+    /// **Catches:** removing the length guard in `secret_to_secret_key` (which
+    /// would let `from_seed` panic or silently accept the wrong-length seed),
+    /// or reporting the wrong `expected`/`got` lengths.
+    #[test]
+    fn wrong_length_secret_rejected() {
+        let short = [0u8; 16]; // not SECRET_LEN (32)
+
+        let pk_err = L1WalletBls::public_key(&short).unwrap_err();
+        match pk_err {
+            KeystoreError::InvalidPlaintext { expected, got } => {
+                assert_eq!(expected, L1WalletBls::SECRET_LEN);
+                assert_eq!(got, 16);
+            }
+            other => panic!("expected InvalidPlaintext, got {other:?}"),
+        }
+
+        let sign_err = L1WalletBls::sign(&short, b"x").unwrap_err();
+        assert!(matches!(
+            sign_err,
+            KeystoreError::InvalidPlaintext { got: 16, .. }
+        ));
+    }
 }
