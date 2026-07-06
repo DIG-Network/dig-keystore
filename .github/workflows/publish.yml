@@ -61,6 +61,39 @@ jobs:
       - name: Check documentation
         run: cargo doc --no-deps --all-features
 
+  wasm:
+    name: wasm build + clippy + wasm-bindgen-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: clippy
+          targets: wasm32-unknown-unknown
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: install wasm-pack (official installer)
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: clippy (dig-keystore-wasm, wasm32 target)
+        run: cargo clippy -p dig-keystore-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # `wasm-pack test --node` runs the wasm-bindgen-test suite (wasm/tests/opaque_wasm.rs),
+      # including the native<->wasm byte-compatibility KAT vectors (dig_ecosystem #147 Phase A).
+      - name: wasm-bindgen-test (Node)
+        working-directory: wasm
+        run: npm test
+
   publish:
     name: Publish to crates.io
     runs-on: ubuntu-latest

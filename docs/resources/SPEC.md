@@ -12,6 +12,13 @@ authoritative_sources:
 
 # dig-keystore — Specification
 
+> **This is a design-era doc kept for the crates.io package (`Cargo.toml` ships it as
+> `docs/resources/SPEC.md`).** The repo-root [`SPEC.md`](../../SPEC.md) is the normative,
+> RFC-2119 spec of record (CLAUDE.md §4.2) and is kept current with every change, including
+> the `opaque` module (§15) and the `dig-keystore-wasm` WebAssembly binding (§16). Consult it
+> first; this file's byte-layout diagram below remains accurate for `DIGVK1`/`DIGLW1` but does
+> not describe additions made after `last_updated` above.
+
 Encrypted secret-key storage for DIG binaries. Provides:
 
 - On-disk file format for BLS signing keys (`DIGVK1`) and L1 wallet keys (`DIGLW1`).

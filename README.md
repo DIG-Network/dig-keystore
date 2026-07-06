@@ -36,7 +36,9 @@ Builds on [`chia-bls` 0.26](https://crates.io/crates/chia-bls) for BLS12-381 key
 21. [Common call sequences](#common-call-sequences)
 22. [Performance](#performance)
 23. [Testing](#testing)
-24. [License](#license)
+24. [`opaque` module](#opaque-module)
+25. [WebAssembly / npm (`dig-keystore-wasm`)](#webassembly--npm-dig-keystore-wasm)
+26. [License](#license)
 
 ---
 
@@ -907,7 +909,7 @@ All figures on a modern x86_64 laptop (Zen4 / M2-class).
 ## Testing
 
 ```bash
-cargo test --features testing     # 72 tests across 6 binaries
+cargo test --features testing     # 94 tests across 7 binaries
 cargo test --release              # realistic KDF timings
 cargo clippy --features testing --all-targets -- -D warnings   # lint-clean
 ```
@@ -916,13 +918,86 @@ Test coverage:
 
 | Suite | Asserts |
 |---|---|
-| `src/**/tests` | Unit tests for each primitive (AES-GCM, Argon2id, `Password`, file format, schemes, backends, signer) |
+| `src/**/tests` | Unit tests for each primitive (AES-GCM, Argon2id, `Password`, file format, schemes, backends, signer, `opaque`) |
 | `tests/roundtrip.rs` | End-to-end create / load / unlock / sign / verify; password + KDF rotation; type-confusion rejection |
 | `tests/wrong_password.rs` | Wrong / empty / unicode / 4 KiB passwords; failed `change_password` leaves file intact |
 | `tests/tamper.rs` | Every byte of a valid file flipped once — load or unlock must fail; truncation + garbage rejection |
 | `tests/vectors.rs` | Known-answer tests pinning BLS derivation + file layout (105-byte size, magic bytes) |
+| `tests/opaque_vectors.rs` | `opaque` module KAT, shared byte-for-byte with `wasm/tests/opaque_wasm.rs` (native↔wasm compat proof) |
 
 Every `#[test]` carries a `/// **Proves:** ... **Why it matters:** ... **Catches:** ...` triple-slash doc comment. Run `cargo doc --open` to browse.
+
+---
+
+## `opaque` module
+
+Password-seals secret bytes of **any length** (including empty) — for callers that don't fit
+`Keystore<K>`'s fixed `SECRET_LEN` + typed-public-key model, e.g. BIP-39 entropy or any other
+opaque application secret. Same on-disk container as every `Keystore<K>` file (§`SPEC.md`
+§15), distinguished only by magic `DIGOP1` / scheme id `0x0004`. This is the primitive
+`dig-keystore-wasm` (below) wraps for browser callers.
+
+```rust
+use dig_keystore::opaque;
+use dig_keystore::{KdfParams, Password};
+
+let password = Password::from("correct horse battery staple");
+let secret: &[u8] = b"any length of bytes at all, e.g. bip-39 entropy";
+
+let blob = opaque::seal(&password, secret, KdfParams::DEFAULT)?;
+assert!(opaque::verify_password(&password, &blob));
+
+let recovered = opaque::open(&password, &blob)?;
+assert_eq!(&*recovered, secret);
+# Ok::<(), dig_keystore::KeystoreError>(())
+```
+
+There is no `KeychainBackend` involved — `seal`/`open` are pure bytes-in/bytes-out; the
+caller owns storage (a file, a database row, `chrome.storage.local`, …) directly.
+
+---
+
+## WebAssembly / npm (`dig-keystore-wasm`)
+
+`wasm/` is a sibling crate/package in this repo (a Cargo workspace member alongside the main
+`dig-keystore` package — see the `[workspace]` table in `Cargo.toml`) that binds the `opaque`
+module above for browser/Node callers via [wasm-bindgen](https://rustwasm.github.io/docs/wasm-bindgen/).
+It publishes to npm as **`@dignetwork/dig-keystore-wasm`**.
+
+It exists as a SEPARATE package, not a feature on `dig-keystore` itself, so this crate's
+`unsafe_code = "forbid"` lint (a spec-pinned security property, `SPEC.md` §13.2/§16.1) and
+dependency graph stay completely unaffected by wasm support existing.
+
+```js
+import init, { seal, open, verifyPassword } from "@dignetwork/dig-keystore-wasm";
+
+await init(); // optional: installs a console panic hook
+
+const blob = seal("correct horse battery staple", new Uint8Array([1, 2, 3, 4]));
+// store `blob` (a Uint8Array) yourself — e.g. chrome.storage.local — there is no
+// file/keychain backend in the wasm binding
+verifyPassword("correct horse battery staple", blob); // true
+
+const secret = open("correct horse battery staple", blob); // Uint8Array([1,2,3,4])
+```
+
+**Build locally:**
+
+```bash
+cd wasm
+npm run build:bundler   # wasm-pack build --target bundler --release -> wasm/pkg/
+npm test                # wasm-pack test --node (wasm-bindgen-test suite)
+```
+
+**npm publish status:** the org `NPM_TOKEN` is currently broken across every npm-publishing
+DIG repo ([dig_ecosystem #70](https://github.com/DIG-Network/dig_ecosystem/issues/70)), so
+`@dignetwork/dig-keystore-wasm` is not yet live on the npm registry. Until that clears,
+consume it the same way `@dignetwork/chia-provider`/`@dignetwork/chip35-dl-coin-wasm` are
+consumed as a stopgap: build `wasm/pkg` locally (above) from a git checkout of this repo, or
+point your bundler/package manager at that path.
+
+See `SPEC.md` §16 for the full normative binding contract (exported functions, error
+behavior, and the native↔wasm byte-compatibility proof).
 
 ---
 
