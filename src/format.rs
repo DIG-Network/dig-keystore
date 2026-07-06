@@ -285,10 +285,16 @@ impl KeystoreHeader {
 }
 
 /// Known magic prefixes. Extended by schemes; see `scheme/*`.
+///
+/// `DIGOP1` is not a [`crate::scheme::KeyScheme`] magic — it identifies the
+/// [`crate::opaque`] container (arbitrary-length password-sealed secrets, no
+/// typed public-key derivation). Registering it here is purely additive: it
+/// teaches the decoder a new accepted magic without touching how `DIGVK1`/
+/// `DIGLW1` are recognized or decoded (§5.1 backwards-compat spirit).
 fn is_known_magic(m: &[u8; 6]) -> bool {
     // Matches MAGIC constants in the scheme impls. Kept inline here for
     // decode-time validation without needing generic parameters.
-    matches!(m, b"DIGVK1" | b"DIGLW1")
+    matches!(m, b"DIGVK1" | b"DIGLW1" | b"DIGOP1")
 }
 
 /// Serialize the complete file: `header || ciphertext_and_tag || crc32`.
@@ -530,5 +536,30 @@ mod tests {
     fn header_size_constant_correct() {
         assert_eq!(sample_header().encode().len(), HEADER_SIZE);
         assert_eq!(HEADER_SIZE, 53);
+    }
+
+    /// **Proves:** a header stamped with the `DIGOP1` magic (the
+    /// [`crate::opaque`] container, scheme id `0x0004`) is recognized by
+    /// `is_known_magic` / `KeystoreHeader::decode` exactly like `DIGVK1` and
+    /// `DIGLW1` — round-trips through encode/decode bit-exactly.
+    ///
+    /// **Why it matters:** `crate::opaque` bypasses `Keystore<K: KeyScheme>`
+    /// (it has no typed public key), so it is not covered by the
+    /// `KeyScheme`-parameterized tests elsewhere. This pins that registering
+    /// a new magic for a non-`KeyScheme` container is additive: `DIGVK1` and
+    /// `DIGLW1` decoding is untouched (see `unknown_magic_rejected` above,
+    /// still green with the OLD unrecognized-`'X'` case).
+    ///
+    /// **Catches:** a future edit to `is_known_magic` that drops `DIGOP1`,
+    /// or a magic/scheme-id typo between `crate::opaque::MAGIC` and this
+    /// decoder's registration.
+    #[test]
+    fn opaque_magic_is_known_and_roundtrips() {
+        let mut h = sample_header();
+        h.magic = *b"DIGOP1";
+        h.scheme_id = 0x0004;
+        let bytes = h.encode();
+        let h2 = KeystoreHeader::decode(&bytes).unwrap();
+        assert_eq!(h, h2);
     }
 }
