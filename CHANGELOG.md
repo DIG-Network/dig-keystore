@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.2.0] - 2026-07-06
+
+### Features
+- Add opaque secret sealing + dig-keystore-wasm wasm-bindgen binding
+
 ## [0.1.3] - 2026-07-06
 
 ### Bug Fixes
