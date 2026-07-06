@@ -89,7 +89,13 @@ Plaintext layout (what gets encrypted):
 
 - **BlsSigning.** 32-byte seed. The BLS secret key is derived via `chia_bls::SecretKey::from_seed(seed)` on unlock. This matches Chia's convention of storing the seed, not the curve-scalar, so key shares can be regenerated deterministically.
 - **L1WalletSecp256k1.** 32-byte seed + optional 64-byte BIP-39 mnemonic entropy (encoded length-prefixed). HD derivation happens on unlock.
-- **L1WalletBls.** 32-byte seed for Chia BLS wallet key (Chia uses BLS for L1 spends).
+- **L1WalletBls.** 32-byte raw scalar of an **already-derived** Chia L1 wallet master
+  secret key (`chia_bls::SecretKey::to_bytes()`) — NOT a seed. The wallet layer performs
+  `mnemonic -> mnemonic.to_seed("") -> SecretKey::from_seed(seed)` once, upstream, then
+  hands this crate the resulting master key's raw bytes; `public_key`/`sign` reconstruct
+  it via `chia_bls::SecretKey::from_bytes(bytes)` and MUST NOT re-run `from_seed` on it
+  (doing so double-derives and produces a key that does not match `dig-l1-wallet` / Sage
+  / the Chia reference wallet — fixed in `dig_ecosystem` issues #64 / #57).
 
 `MAGIC` signals what the caller should treat the file as. Mixing (using a `DIGVK1` file with `L1WalletScheme`) is a hard error.
 

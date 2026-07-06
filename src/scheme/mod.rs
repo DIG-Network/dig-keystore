@@ -141,7 +141,10 @@ pub trait KeyScheme: Send + Sync + 'static {
     ///
     /// Returns [`Err`](crate::error::KeystoreError) if `secret.len() != SECRET_LEN`,
     /// or if the bytes are malformed for the scheme (e.g., invalid secp256k1
-    /// scalar). BLS schemes accept any 32 bytes.
+    /// scalar). [`BlsSigning`] derives via `from_seed`, which accepts any 32
+    /// bytes; [`L1WalletBls`] deserializes an already-derived canonical
+    /// scalar via `from_bytes` and rejects out-of-range values (rare, but
+    /// possible — see its module docs).
     fn public_key(secret: &[u8]) -> Result<Self::PublicKey>;
 
     /// Sign `msg` using the given secret bytes.
