@@ -64,6 +64,7 @@ mod error;
 mod format;
 mod kdf;
 mod keystore;
+pub mod opaque;
 mod password;
 pub mod scheme;
 mod signer;

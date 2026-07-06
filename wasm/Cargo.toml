@@ -1,0 +1,43 @@
+[package]
+name = "dig-keystore-wasm"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+publish = false
+description = "WebAssembly bindings for dig-keystore's opaque secret sealing (AES-256-GCM + Argon2id) for browser callers (dig_ecosystem #147 Phase A)."
+repository = "https://github.com/DIG-Network/dig-keystore"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["console-panic-hook"]
+# Installs a panic hook that forwards Rust panics to the browser console with a
+# real message + stack trace instead of an opaque "unreachable executed" trap.
+console-panic-hook = ["dep:console_error_panic_hook"]
+
+[dependencies]
+dig-keystore = { path = ".." }
+wasm-bindgen = "0.2"
+console_error_panic_hook = { version = "0.1", optional = true }
+# `rand_chacha` is already in dig-keystore's own dependency graph (used by its
+# scheme tests); reused here (as a REGULAR dependency, not dev-only) so the
+# `sealWithSeed` test-fixture export below can build for a normal wasm-bindgen
+# test binary, which only sees this crate's own [dependencies]/[dev-dependencies].
+rand_chacha = "0.3"
+
+# `getrandom`'s "js" backend is what makes `rand_core::OsRng` (used internally by
+# `dig_keystore::opaque::seal`) work under wasm32-unknown-unknown — without it,
+# OsRng panics at runtime in a browser/Node with "not supported on this platform".
+# On non-wasm32 targets this feature is a no-op (conditional on target_arch).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[package.metadata.cargo-machete]
+ignored = ["getrandom"]
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
