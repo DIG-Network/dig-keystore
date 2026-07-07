@@ -1,14 +1,11 @@
 name: publish-npm
 
 # Build the wasm-pack bundler package (wasm/ -> wasm/pkg) and publish it to npmjs as
-# @dignetwork/dig-keystore-wasm. Auth uses the org-level NPM_TOKEN secret (must be granted to
-# this repo in the org secret's repository-access list). Runs when a GitHub Release is
-# published, when a version tag is pushed, or on manual dispatch.
-#
-# NOTE (dig_ecosystem #70): the org NPM_TOKEN is currently broken (404s on every npm-publishing
-# repo). This workflow is wired and ready; the `npm publish` step is expected to fail with a 404
-# until #70 is resolved. That failure does NOT block the crates.io release (publish.yml) or the
-# tag-on-merge changelog flow (release.yml) — this workflow is independent and additive.
+# @dignetwork/dig-keystore-wasm. Auth uses npm Trusted Publishing (OIDC) — no NPM_TOKEN secret.
+# The npm CLI exchanges this workflow's GitHub Actions OIDC token for a short-lived publish
+# credential; npm-side, the trusted publisher must be configured for org DIG-Network, repo
+# dig-keystore, workflow publish-npm.yml. Runs when a GitHub Release is published, when a
+# version tag is pushed, or on manual dispatch.
 on:
   push:
     tags: ['v*']
@@ -23,6 +20,7 @@ concurrency:
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   publish:
@@ -39,13 +37,15 @@ jobs:
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
       - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
         with:
-          node-version: 20
+          node-version: "22"
           registry-url: "https://registry.npmjs.org"
       - name: build wasm package (wasm-pack bundler -> wasm/pkg)
         working-directory: wasm
         run: npm run build:bundler
+      - name: upgrade npm (trusted publishing requires npm >= 11.5.1)
+        run: |
+          npm install -g npm@latest
+          npm --version
       - name: publish to npmjs
         working-directory: wasm
         run: npm publish ./pkg --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
