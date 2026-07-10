@@ -969,7 +969,7 @@ It exists as a SEPARATE package, not a feature on `dig-keystore` itself, so this
 dependency graph stay completely unaffected by wasm support existing.
 
 ```js
-import init, { seal, open, verifyPassword } from "@dignetwork/dig-keystore-wasm";
+import init, { seal, open, sealStrong, verifyPassword } from "@dignetwork/dig-keystore-wasm";
 
 await init(); // optional: installs a console panic hook
 
@@ -979,6 +979,10 @@ const blob = seal("correct horse battery staple", new Uint8Array([1, 2, 3, 4]));
 verifyPassword("correct horse battery staple", blob); // true
 
 const secret = open("correct horse battery staple", blob); // Uint8Array([1,2,3,4])
+
+// STRONG preset (256 MiB / 4 iterations / 4 lanes) for a high-value secret — opened
+// with the SAME `open` above; the preset is recorded in the blob's own header.
+const strongBlob = sealStrong("correct horse battery staple", new Uint8Array([1, 2, 3, 4]));
 ```
 
 **Build locally:**
@@ -989,12 +993,17 @@ npm run build:bundler   # wasm-pack build --target bundler --release -> wasm/pkg
 npm test                # wasm-pack test --node (wasm-bindgen-test suite)
 ```
 
-**npm publish status:** the org `NPM_TOKEN` is currently broken across every npm-publishing
-DIG repo ([dig_ecosystem #70](https://github.com/DIG-Network/dig_ecosystem/issues/70)), so
-`@dignetwork/dig-keystore-wasm` is not yet live on the npm registry. Until that clears,
-consume it the same way `@dignetwork/chia-provider`/`@dignetwork/chip35-dl-coin-wasm` are
-consumed as a stopgap: build `wasm/pkg` locally (above) from a git checkout of this repo, or
-point your bundler/package manager at that path.
+**npm publish status:** `.github/workflows/publish-npm.yml` publishes via npm Trusted
+Publishing (OIDC) — no `NPM_TOKEN` secret involved. npm's trusted-publisher config,
+however, can only be attached to a package that already exists on the registry, so the
+FIRST publish of a brand-new scoped name 404s even with OIDC wired up correctly (confirmed
+via the `v0.2.1` `publish-npm` run) — an org-admin bootstrap (one manual authenticated
+`npm publish` to create the package) is needed before OIDC publishing can take over.
+`@dignetwork/dig-keystore-wasm` is therefore not yet live on the npm registry. Until that
+clears, consume it the same way `@dignetwork/chia-provider`/`@dignetwork/chip35-dl-coin-wasm`
+are consumed as a stopgap: build `wasm/pkg` locally (above) from a git checkout of this
+repo, or vendor that built `pkg/` output into the consuming repo as a local/`file:`
+dependency (the dig-chrome-extension's approach, dig_ecosystem #147 Phase B).
 
 See `SPEC.md` §16 for the full normative binding contract (exported functions, error
 behavior, and the native↔wasm byte-compatibility proof).

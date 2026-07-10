@@ -118,3 +118,34 @@ fn verify_password_reports_correctly() {
         b"not a keystore blob at all"
     ));
 }
+
+/// **Proves:** `sealStrong` (the STRONG Argon2id preset — 256 MiB / 4
+/// iterations / 4 lanes, `KdfParams::STRONG`) round-trips the exact secret
+/// bytes through the ordinary `open`, exactly like the DEFAULT-preset
+/// `seal`/`open` pair above.
+///
+/// **Why it matters:** dig_ecosystem #147 Phase B — the extension's
+/// `ARGON2_STRONG` high-value-wallet option (`digwx1.ts`) delegates to this
+/// export instead of hand-rolled Argon2id; losing the STRONG preset when
+/// migrating to `dig-keystore-wasm` would be a feature regression.
+///
+/// **Catches:** a copy-paste of `seal` that forgets to swap in
+/// `KdfParams::STRONG`, or a `sealStrong` that silently falls back to
+/// `KdfParams::DEFAULT`.
+#[wasm_bindgen_test]
+fn seal_strong_roundtrip() {
+    let blob =
+        dig_keystore_wasm::seal_strong("correct horse battery staple", b"strong-preset-secret")
+            .expect("seal_strong should succeed");
+    let recovered = dig_keystore_wasm::open("correct horse battery staple", &blob)
+        .expect("open should succeed");
+    assert_eq!(recovered, b"strong-preset-secret");
+}
+
+/// **Proves:** `sealStrong` rejects the wrong password just like `seal`/`open`
+/// — the STRONG preset doesn't accidentally bypass authentication.
+#[wasm_bindgen_test]
+fn seal_strong_wrong_password_fails() {
+    let blob = dig_keystore_wasm::seal_strong("right", b"secret").unwrap();
+    assert!(dig_keystore_wasm::open("wrong", &blob).is_err());
+}
