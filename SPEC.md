@@ -689,9 +689,10 @@ crates.io, and publishes to npm as `@dignetwork/dig-keystore-wasm` via `wasm-pac
 | `seal(password, secret)` | `(string, Uint8Array) -> Uint8Array`, throws | Direct call to `opaque::seal` with `KdfParams::DEFAULT`. `secret` may be any length, including empty. |
 | `open(password, blob)` | `(string, Uint8Array) -> Uint8Array`, throws | Direct call to `opaque::open`. Throws (rejects) with the `KeystoreError` `Display` string on wrong password, tampering, or a non-opaque blob (§15.3). |
 | `verifyPassword(password, blob)` | `(string, Uint8Array) -> boolean` | Direct call to `opaque::verify_password`. Never throws. |
+| `sealStrong(password, secret)` | `(string, Uint8Array) -> Uint8Array`, throws | Direct call to `opaque::seal` with `KdfParams::STRONG` (256 MiB / 4 iterations / 4 lanes) instead of `DEFAULT` — for a caller's high-value-secret option (dig_ecosystem #147 Phase B: the extension's `ARGON2_STRONG` wallet preset). Opened by the SAME `open` as a `seal`-produced blob; the preset is recorded in the blob's own self-describing header, not tracked by the caller. |
 | `sealWithSeed(password, secret, seed)` | `(string, Uint8Array, bigint) -> Uint8Array`, throws | **Test/fixture-only.** Deterministic `ChaCha20Rng::seed_from_u64(seed)` seal at `KdfParams::FAST_TEST`, for cross-target KAT proofs only (§16.3). MUST NOT be used to seal a real secret — the RNG is trivially predictable. |
 
-Every real export (`seal`/`open`/`verifyPassword`) is a **direct, non-branching** call into
+Every real export (`seal`/`sealStrong`/`open`/`verifyPassword`) is a **direct, non-branching** call into
 `dig_keystore::opaque` — no wasm-specific crypto logic exists in `dig-keystore-wasm`. There
 is deliberately no `KeychainBackend`/`FileBackend`/`MemoryBackend` binding: the file and
 OS-keychain backends have no meaning in a browser, and `seal`/`open` are already
@@ -725,13 +726,19 @@ extension's vault) depends on to prove old blobs stay readable across a native/w
   `wasm/scripts/patch-pkg.mjs` to the scoped name `@dignetwork/dig-keystore-wasm` with
   `publishConfig.access = "public"`.
 - `.github/workflows/publish-npm.yml` builds + publishes on a `v*` tag push, a published
-  GitHub Release, or manual dispatch, authenticating with the org-level `NPM_TOKEN` secret.
-- **Known gap (dig_ecosystem #70):** the org `NPM_TOKEN` is currently broken (404s on every
-  npm-publishing repo in the ecosystem) — the `npm publish` step is expected to fail until
-  that is resolved. This does NOT block consuming `dig-keystore-wasm`: it is buildable and
-  usable as a git/path dependency (`wasm-pack build` locally, or a git submodule/checkout
-  pointing at this repo's `wasm/` directory) in the interim, the same stopgap
-  `@dignetwork/chia-provider` and `@dignetwork/chip35-dl-coin-wasm` use.
+  GitHub Release, or manual dispatch, authenticating via npm Trusted Publishing (OIDC) — no
+  `NPM_TOKEN` secret is used.
+- **Known gap (dig_ecosystem #70-adjacent):** npm's trusted-publisher config can only be
+  attached to a package that already exists on the registry, so the FIRST publish of this
+  brand-new scoped name 404s even with OIDC correctly wired (confirmed: the `v0.2.1`
+  `publish-npm` run authenticated fine and still got `404 Not Found - PUT
+  .../@dignetwork%2fdig-keystore-wasm`) — an org-admin bootstrap (one manual authenticated
+  `npm publish` to create the package) is needed before OIDC publishing can take over. This
+  does NOT block consuming `dig-keystore-wasm`: it is buildable and usable as a git/path
+  dependency (`wasm-pack build` locally, or vendoring the built `wasm/pkg` output into a
+  consuming repo as a local/`file:` dependency) in the interim, the same stopgap
+  `@dignetwork/chia-provider` and `@dignetwork/chip35-dl-coin-wasm` use. The dig-chrome-extension
+  (dig_ecosystem #147 Phase B) vendors the built `pkg/` output this way.
 
 ### 16.5 Conformance
 
@@ -739,9 +746,10 @@ extension's vault) depends on to prove old blobs stay readable across a native/w
 |---|---|
 | W-1 | `dig-keystore-wasm` builds cleanly for `wasm32-unknown-unknown` (`cargo clippy -p dig-keystore-wasm --target wasm32-unknown-unknown -- -D warnings`) |
 | W-2 | `dig-keystore`'s own build/lints/format/dependency graph are unaffected by `dig-keystore-wasm` existing (§13.1, §13.2) |
-| W-3 | `seal`/`open`/`verifyPassword` are direct calls into `opaque::*` — no divergent wasm-only crypto path |
+| W-3 | `seal`/`sealStrong`/`open`/`verifyPassword` are direct calls into `opaque::*` — no divergent wasm-only crypto path |
 | W-4 | The native↔wasm KAT vector (§16.3) matches byte-for-byte in both `tests/opaque_vectors.rs` and `wasm/tests/opaque_wasm.rs` |
 | W-5 | `sealWithSeed` is documented test/fixture-only and MUST NOT be reachable from a production seal path |
+| W-6 | `sealStrong`-produced blobs round-trip through the same `open` as `seal`-produced blobs (`wasm/tests/opaque_wasm.rs::seal_strong_roundtrip`) |
 
 Test evidence: `wasm/tests/opaque_wasm.rs` (`wasm-bindgen-test`, run via `wasm-pack test
 --node`), cross-checked against `tests/opaque_vectors.rs`.

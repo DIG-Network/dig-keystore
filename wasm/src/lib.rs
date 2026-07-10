@@ -87,6 +87,19 @@ pub fn verify_password(password: &str, blob: &[u8]) -> bool {
     opaque::verify_password(&Password::from(password), blob)
 }
 
+/// Seal `secret` under `password` using the STRONG Argon2id preset (256 MiB /
+/// 4 iterations / 4 lanes — [`KdfParams::STRONG`]) instead of [`seal`]'s
+/// [`KdfParams::DEFAULT`], for a caller's high-value-secret option (dig_ecosystem
+/// #147 Phase B — the extension's `ARGON2_STRONG` wallet preset). Otherwise
+/// identical to [`seal`]: OS randomness, any secret length, opened by the same
+/// [`open`] (the preset is recorded in the blob's own self-describing header,
+/// not tracked by the caller).
+#[wasm_bindgen(js_name = "sealStrong")]
+pub fn seal_strong(password: &str, secret: &[u8]) -> Result<Vec<u8>, JsValue> {
+    opaque::seal(&Password::from(password), secret, KdfParams::STRONG)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
 /// **Test/fixture-only.** Seals `secret` under `password` using a
 /// deterministic RNG seeded from `seed`, so the exact output bytes are
 /// reproducible. Used exclusively to prove `wasm/tests/opaque_wasm.rs`'s
