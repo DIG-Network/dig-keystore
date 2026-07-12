@@ -1,0 +1,5 @@
+# cargo-nextest config (dig_ecosystem #489: flaky-test management).
+# nextest natively detects "failed then passed on retry" and reports it as
+# flaky in its output/JUnit — no separate flaky-tracking tooling needed.
+[profile.default]
+retries = 2
