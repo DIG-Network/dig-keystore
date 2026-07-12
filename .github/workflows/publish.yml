@@ -58,7 +58,7 @@ jobs:
           tool: cargo-llvm-cov,nextest
 
       - name: Run tests with coverage (gate >=80% lines; nextest retries=2, flaky surfaced)
-        run: cargo llvm-cov nextest --all-features --fail-under-lines 80 --lcov --output-path lcov.info -- --test-threads=1
+        run: cargo llvm-cov nextest --all-features --test-threads=1 --fail-under-lines 80 --lcov --output-path lcov.info
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
