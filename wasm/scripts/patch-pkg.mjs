@@ -16,7 +16,7 @@
 // Run automatically by: npm run build:bundler
 // Mirrors chip35_dl_coin's wasm/scripts/patch-pkg.mjs (dig_ecosystem #147 Phase A).
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
@@ -24,8 +24,17 @@ const SCOPED_NAME = "@dignetwork/dig-keystore-wasm";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pkgPath = resolve(here, "..", "pkg", "package.json");
+const pkgDir = dirname(pkgPath);
 
 const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+
+// 0) wasm-pack does not reliably emit BOTH license texts for a dual
+//    "Apache-2.0 OR MIT" crate; copy them in explicitly so the published
+//    tarball always carries real license text (stops the wasm-pack
+//    "no LICENSE file(s) found" warning and satisfies the dual license).
+for (const license of ["LICENSE-APACHE", "LICENSE-MIT"]) {
+  copyFileSync(resolve(here, "..", license), resolve(pkgDir, license));
+}
 
 // 1) Scope the name to the published npm package. wasm-pack emits the unscoped
 //    Cargo crate name; we always overwrite it with the scoped name.
@@ -42,6 +51,8 @@ const requiredFiles = [
   "dig_keystore_wasm.js",
   "dig_keystore_wasm_bg.js",
   "dig_keystore_wasm.d.ts",
+  "LICENSE-APACHE",
+  "LICENSE-MIT",
 ];
 const files = new Set(Array.isArray(pkg.files) ? pkg.files : []);
 for (const f of requiredFiles) files.add(f);
