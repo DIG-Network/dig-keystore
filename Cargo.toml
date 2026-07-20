@@ -63,6 +63,17 @@ parking_lot = "0.12"
 # Optional features
 zxcvbn = { version = "3", optional = true }
 
+# OS-native credential store (`os-keychain` feature). Target-gated to Windows /
+# macOS — the only platforms whose credential store gates access per-application
+# (see `src/backend/os_keychain.rs` module docs). `default-features = false`
+# selects only the native backends, so no dbus/libsecret system libraries are
+# pulled and CI stays free of system deps. Never compiled on Linux or wasm.
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+keyring = { version = "3", default-features = false, features = [
+    "windows-native",
+    "apple-native",
+], optional = true }
+
 [dev-dependencies]
 proptest = "1"
 tempfile = "3"
@@ -78,6 +89,12 @@ default = ["file-backend"]
 
 # Ships FileBackend (filesystem KeychainBackend).
 file-backend = []
+
+# Ships OsKeychainBackend (OS-native credential store: Windows Credential
+# Manager / macOS Keychain via `keyring`; other targets fall back to the file
+# backend). The `keyring` dependency is target-gated so it never compiles on
+# Linux or wasm.
+os-keychain = ["dep:keyring"]
 
 # Enables Password::strength via zxcvbn.
 password-strength = ["dep:zxcvbn"]
