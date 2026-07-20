@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.4.0] - 2026-07-20
+
+### Features
+- **backend:** Add `OsKeychainBackend` — OS-native credential-store `KeychainBackend` (Windows Credential Manager / macOS Keychain via `keyring`), behind the off-by-default `os-keychain` feature. `open(service) -> Option<Self>` fails to `None` where no usable OS store exists so callers fall back to `FileBackend`; `keyring` is target-gated to Windows/macOS and never compiled on Linux/wasm. Additive only — no existing format changed. Satisfies NC-2 (encrypted-at-rest). (#1024)
+
 ## [0.3.1] - 2026-07-12
 
 ### CI
