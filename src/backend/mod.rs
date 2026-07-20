@@ -11,6 +11,8 @@ use crate::error::Result;
 #[cfg(feature = "file-backend")]
 mod file;
 mod memory;
+#[cfg(feature = "os-keychain")]
+mod os_keychain;
 
 #[cfg(feature = "file-backend")]
 pub use file::FileBackend;
@@ -19,6 +21,8 @@ pub use file::FileBackend;
 /// encrypt/decrypt-bytes helpers) wrap it in scratch backends to reuse the
 /// full keystore format without touching the filesystem.
 pub use memory::MemoryBackend;
+#[cfg(feature = "os-keychain")]
+pub use os_keychain::OsKeychainBackend;
 
 /// An opaque key identifying a single encrypted blob within a backend.
 ///

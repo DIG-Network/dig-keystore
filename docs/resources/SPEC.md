@@ -24,7 +24,7 @@ Encrypted secret-key storage for DIG binaries. Provides:
 - On-disk file format for BLS signing keys (`DIGVK1`) and L1 wallet keys (`DIGLW1`).
 - AES-256-GCM + Argon2id encryption with memory-hard KDF parameters.
 - `Keystore<K>` generic over key scheme, `SignerHandle<K>` that never exposes raw key bytes.
-- A `KeychainBackend` trait with `FileBackend` shipped and `OsKeyringBackend` + hardware backends (`LedgerBackend`, `YubiHsmBackend`) as planned future additions.
+- A `KeychainBackend` trait with `FileBackend` and `OsKeychainBackend` (OS-native credential store, feature `os-keychain`) shipped, and hardware backends (`LedgerBackend`, `YubiHsmBackend`) as planned future additions.
 - `Zeroizing` memory hygiene on every secret.
 
 The crate is the single audit surface for secret-key handling in the DIG workspace. Every BLS or L1 wallet key passed through DIG code goes through this crate.
@@ -41,7 +41,7 @@ The crate is the single audit surface for secret-key handling in the DIG workspa
 - Password strength check (optional) via `zxcvbn`.
 - Key generation (BLS via `chia-bls::SecretKey::from_seed`, L1 via HD derivation) driven by `KeyScheme::generate`.
 - Export / import via EIP-2335 / Chia `.keychain` compatibility shims (feature-gated).
-- `KeychainBackend` trait abstraction so a future Phase-2 `OsKeyringBackend` can be slotted in without changing call sites.
+- `KeychainBackend` trait abstraction with a shipped `OsKeychainBackend` (OS-native credential store) slotted in without changing call sites.
 
 **Out of scope.**
 
@@ -286,9 +286,33 @@ impl KeychainBackend for FileBackend {
 
 **Secure delete.** `FileBackend::delete` overwrites the file with zeros (one pass; modern SSDs make deeper wipes theatre) before unlink. Documented as best-effort.
 
+### `OsKeychainBackend` (feature `os-keychain`)
+
+A `KeychainBackend` that persists each blob in the host OS credential store — **Windows Credential Manager** or **macOS Keychain** — via the cross-platform `keyring` crate. Each `BackendKey` maps to a `(service, account)` pair: the service is fixed per backend instance (chosen by the caller), the account is the `BackendKey` string. The stored value is the raw keystore ciphertext, written through `keyring`'s binary secret API (no textual re-encoding).
+
+**Why an OS credential store.** On Windows and macOS the credential store gates access with a **per-application ACL** scoped to the logged-in user and released by the login session. That ACL — not the crate — is the access-control primitive. The keystore's own DIGVK1/DIGOP1 sealing remains layered underneath as defence-in-depth against a raw at-rest artifact; it is not weakened or replaced by this backend.
+
+**Platform gating (HARD).** The `keyring` dependency is compiled **only** on `target_os = "windows"` or `target_os = "macos"`. On every other target — Linux and `wasm32` included — `keyring` is never pulled (no dbus/libsecret system-library tax, no wasm break) and `OsKeychainBackend::open` returns `None` so callers fall back to `FileBackend`. Linux is deliberately excluded as a custody primary: the kernel keyutils session keyring is readable by any same-UID process and is non-persistent across logout, so the passphrase-sealed file is the correct primary there.
+
+**Fail-to-fallback construction.**
+
+```rust
+impl OsKeychainBackend {
+    /// Open the OS credential store for `service`, probing the backend once.
+    /// Returns `None` when no usable OS store exists on this host (⇒ the caller
+    /// uses `FileBackend`). On Linux / wasm this is always `None`.
+    pub fn open(service: impl Into<String>) -> Option<Self>;
+}
+```
+
+`open` probes the backend with a throwaway lookup: a `NoEntry` result proves the store is reachable (and returns `Some`); only a hard backend error returns `None`. This makes "is the OS store usable?" a single decision taken once, rather than a failure surfacing mid-`unlock`.
+
+**Enumeration (`list`).** OS credential stores expose no native key enumeration. `OsKeychainBackend` maintains a best-effort **index entry** (a reserved account) holding the set of live `BackendKey`s; `list(prefix)` filters it. `read`/`write`/`delete`/`exists` consult the credential store directly and are the source of truth — the index only powers `list`, so index/store drift can never corrupt a read or a write, only stale a listing. Index mutation is serialized within the process by a mutex.
+
+**Memory hygiene.** The index's in-process buffers (the joined key-name list read from and written to `INDEX_ACCOUNT`) are held in `Zeroizing` byte buffers and wiped on drop. The ciphertext blob itself — the argument to `write` and the return value of `read` — is passed through to/from the OS credential store untouched and is NOT zeroized here, matching `FileBackend` and the `KeychainBackend` trait contract: zeroizing the *decrypted* plaintext is the caller's (`Keystore`/`SignerHandle`) responsibility, not the backend's. `OsKeychainBackend`'s `Debug` impl redacts — no service, account, or secret material is ever printed.
+
 ### Planned future backends
 
-- **`OsKeyringBackend`** — macOS Keychain / Windows Credential Store / freedesktop Secret Service. Same trait; zero code changes at call sites. Phase 2 target.
 - **`LedgerBackend`** — communicates with a connected Ledger Nano. The `sign` operation forwards to the device; no `read`/`write` needed (ciphertext never leaves the device). Implemented as a `KeychainBackend` that returns placeholder metadata and a `SignerHandle<K>` that proxies `sign` over USB HID.
 - **`YubiHsmBackend`** — same shape as Ledger.
 
@@ -345,12 +369,16 @@ pub enum KeystoreError {
 | KS-008 | KDF defaults are ≥ 64 MiB memory, ≥ 3 iterations, ≥ 4 lanes | `KdfParams::DEFAULT` constants |
 | KS-009 | `KeyScheme::MAGIC` uniquely identifies the scheme on disk | review gate |
 | KS-010 | Every panic path in `unlock` is caught and converted to `DecryptFailed` | `catch_unwind` at the boundary |
+| KS-011 | `OsKeychainBackend::open` returns `None` (never panics/errors mid-op) when no usable OS store exists — always `None` on Linux/wasm | `open` probe + target gating |
+| KS-012 | `OsKeychainBackend` `read`/`write`/`delete`/`exists` consult the credential store directly; the `list` index is best-effort and never authoritative for a read | backend impl |
+| KS-013 | `keyring` is compiled only on Windows/macOS; never on Linux or wasm | target-gated `Cargo.toml` dependency |
 
 ## Feature Flags
 
 | Flag | Default | Effect |
 |---|---|---|
 | `file-backend` | on | Ships `FileBackend` |
+| `os-keychain` | off | Ships `OsKeychainBackend` (Windows Credential Manager / macOS Keychain via `keyring`; `None` ⇒ file fallback elsewhere). `keyring` is target-gated to Windows/macOS. |
 | `password-strength` | off | Enables `Password::strength` via `zxcvbn` |
 | `eip2335` | off | Import/export in Ethereum keystore v4 JSON format (for operators migrating from `ethdo`, `eth2-val-tools`, etc.) |
 | `chia-keychain` | off | Import Chia `.keychain` files (seed-based) |
@@ -447,7 +475,8 @@ dig-keystore/
 │   ├── backend/
 │   │   ├── mod.rs             ← KeychainBackend trait
 │   │   ├── file.rs            ← FileBackend
-│   │   └── memory.rs          ← MemoryBackend (feature = "testing")
+│   │   ├── memory.rs          ← MemoryBackend
+│   │   └── os_keychain.rs     ← OsKeychainBackend (feature = "os-keychain")
 │   ├── eip2335.rs             ← optional import/export (feature = "eip2335")
 │   ├── chia_keychain.rs       ← optional (feature = "chia-keychain")
 │   └── error.rs

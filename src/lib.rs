@@ -74,6 +74,8 @@ mod signer;
 #[cfg(feature = "file-backend")]
 pub use backend::FileBackend;
 pub use backend::MemoryBackend;
+#[cfg(feature = "os-keychain")]
+pub use backend::OsKeychainBackend;
 pub use backend::{BackendKey, KeychainBackend};
 
 pub use error::{KeystoreError, Result};
