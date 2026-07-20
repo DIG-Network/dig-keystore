@@ -108,18 +108,37 @@ impl OsKeychainBackend {
         }
     }
 
-    /// Load the enumeration index (the set of live keys). A missing or
-    /// unreadable index yields an empty set — `list` is best-effort.
+    /// Load the enumeration index for `list` (the set of live keys). A
+    /// missing or unreadable index yields an empty set — `list` is
+    /// best-effort per the module docs. Insert/remove use
+    /// [`load_index_for_update`](Self::load_index_for_update) instead, which
+    /// keeps a hard read error distinct from "no index yet" so a
+    /// read-modify-write never clobbers a previously-persisted index.
     fn load_index(&self) -> Vec<String> {
-        let raw = match self.store.get(INDEX_ACCOUNT) {
-            Ok(Some(bytes)) => Zeroizing::new(bytes),
-            _ => return Vec::new(),
-        };
-        String::from_utf8_lossy(&raw)
-            .lines()
-            .filter(|l| !l.is_empty())
-            .map(str::to_owned)
-            .collect()
+        self.load_index_for_update().unwrap_or_default()
+    }
+
+    /// Load the enumeration index for a read-modify-write, distinguishing a
+    /// genuinely empty index (`Ok(None)` — fresh keystore, nothing indexed
+    /// yet) from a hard/transient store error (`Err`).
+    ///
+    /// This distinction matters: `index_insert`/`index_remove` must NOT
+    /// treat a transient read failure as "empty" and then persist that empty
+    /// index, which would silently drop every other already-indexed key
+    /// name from future `list()` calls.
+    fn load_index_for_update(&self) -> Result<Vec<String>> {
+        match self.store.get(INDEX_ACCOUNT) {
+            Ok(Some(bytes)) => {
+                let raw = Zeroizing::new(bytes);
+                Ok(String::from_utf8_lossy(&raw)
+                    .lines()
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_owned)
+                    .collect())
+            }
+            Ok(None) => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
     }
 
     /// Persist the enumeration index. Best-effort — a failure to write the
@@ -132,9 +151,15 @@ impl OsKeychainBackend {
     }
 
     /// Add `key` to the index if absent.
+    ///
+    /// Skips the update entirely on a hard/transient index-read error rather
+    /// than persisting an empty index in its place — see
+    /// [`load_index_for_update`](Self::load_index_for_update).
     fn index_insert(&self, key: &str) {
         let _guard = self.index_lock.lock();
-        let mut keys = self.load_index();
+        let Ok(mut keys) = self.load_index_for_update() else {
+            return;
+        };
         if !keys.iter().any(|k| k == key) {
             keys.push(key.to_owned());
             self.store_index(&keys);
@@ -142,15 +167,34 @@ impl OsKeychainBackend {
     }
 
     /// Remove `key` from the index if present.
+    ///
+    /// Skips the update entirely on a hard/transient index-read error, for
+    /// the same reason as [`index_insert`](Self::index_insert).
     fn index_remove(&self, key: &str) {
         let _guard = self.index_lock.lock();
-        let mut keys = self.load_index();
+        let Ok(mut keys) = self.load_index_for_update() else {
+            return;
+        };
         let before = keys.len();
         keys.retain(|k| k != key);
         if keys.len() != before {
             self.store_index(&keys);
         }
     }
+}
+
+/// Reject a key name that cannot safely be stored: one equal to the
+/// reserved [`INDEX_ACCOUNT`] sentinel (which would shadow the enumeration
+/// index itself) or containing a newline (which would poison the
+/// newline-joined index format persisted by [`store_index`]).
+fn validate_key_name(name: &str) -> Result<()> {
+    if name == INDEX_ACCOUNT || name.contains('\n') {
+        return Err(KeystoreError::from(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid key name (reserved or contains newline): {name:?}"),
+        )));
+    }
+    Ok(())
 }
 
 /// Redacted `Debug` — never prints service, account, or secret material.
@@ -174,6 +218,7 @@ impl KeychainBackend for OsKeychainBackend {
     }
 
     fn write(&self, key: &BackendKey, data: &[u8]) -> Result<()> {
+        validate_key_name(key.as_str())?;
         self.store.set(key.as_str(), data)?;
         // Authoritative entry is written; index is a best-effort convenience.
         self.index_insert(key.as_str());
@@ -225,7 +270,12 @@ impl KeyringStore {
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 fn keyring_err(e: keyring::Error) -> KeystoreError {
-    // Never embed the account/secret in the message — only the error class.
+    // Never embed SECRET material in the message. `{e}` is only the error
+    // class in the common case, but the pathological `keyring::Error::Ambiguous`
+    // variant may include a non-secret account/service identifier pulled from
+    // the platform backend (e.g. which of several matching credential-store
+    // entries it found) — that identifier is not sensitive on its own, unlike
+    // the secret bytes this function never has access to.
     KeystoreError::from(std::io::Error::other(format!("OS credential store: {e}")))
 }
 
@@ -466,6 +516,107 @@ mod tests {
         }));
         assert!(be.read(&BackendKey::new("x")).is_err());
         assert!(be.exists(&BackendKey::new("x")).is_err());
+    }
+
+    /// **Proves:** `write` rejects a key name equal to the reserved
+    /// [`INDEX_ACCOUNT`] sentinel or containing a newline, while a normal
+    /// name still succeeds.
+    ///
+    /// **Why it matters:** A newline in a key name would poison the
+    /// newline-joined index format (`store_index`/`load_index` split on
+    /// `\n`), corrupting `list()` for every other key. A name equal to
+    /// `INDEX_ACCOUNT` would let a caller's `write` silently overwrite the
+    /// enumeration index itself.
+    ///
+    /// **Catches:** a `write` that stores the raw name without validating it
+    /// first.
+    #[test]
+    fn write_rejects_reserved_name_and_newline() {
+        let be = backend();
+
+        let err = be.write(&BackendKey::new(INDEX_ACCOUNT), b"x").unwrap_err();
+        assert!(matches!(err, KeystoreError::Backend(_)));
+
+        let err = be.write(&BackendKey::new("evil\nname"), b"x").unwrap_err();
+        assert!(matches!(err, KeystoreError::Backend(_)));
+
+        // A normal name is unaffected.
+        be.write(&BackendKey::new("validator_bls"), b"ok").unwrap();
+        assert_eq!(be.read(&BackendKey::new("validator_bls")).unwrap(), b"ok");
+    }
+
+    /// **Proves:** a transient/hard error reading the index during a `write`
+    /// does NOT clobber the index — previously-indexed key names survive and
+    /// still appear in a later `list()` once the store's index read recovers.
+    ///
+    /// **Why it matters:** `load_index` used to collapse "index read failed"
+    /// and "index is empty" into the same `Vec::new()`, so `index_insert`
+    /// would persist a fresh index containing only the just-written key,
+    /// silently dropping every other already-indexed name from future
+    /// `list()` calls.
+    ///
+    /// **Catches:** a `load_index_for_update`/`index_insert` that treats a
+    /// hard read error as "start empty" instead of "skip the update".
+    #[test]
+    fn transient_index_read_error_does_not_drop_existing_names() {
+        // A `RawStore` double whose index read can be toggled to fail
+        // independently of every other account — models a transient
+        // keyring hiccup on just the enumeration entry, not "no index yet".
+        // The fail flag is shared via `Arc` so the test can flip it after
+        // constructing the backend (which takes ownership of the store).
+        struct FlakyIndexStore {
+            map: Mutex<HashMap<String, Vec<u8>>>,
+            fail_index_read: std::sync::Arc<Mutex<bool>>,
+        }
+
+        impl RawStore for FlakyIndexStore {
+            fn get(&self, account: &str) -> Result<Option<Vec<u8>>> {
+                if account == INDEX_ACCOUNT && *self.fail_index_read.lock() {
+                    return Err(KeystoreError::from(std::io::Error::other(
+                        "transient keyring read failure",
+                    )));
+                }
+                Ok(self.map.lock().get(account).cloned())
+            }
+            fn set(&self, account: &str, secret: &[u8]) -> Result<()> {
+                self.map.lock().insert(account.to_owned(), secret.to_vec());
+                Ok(())
+            }
+            fn remove(&self, account: &str) -> Result<()> {
+                self.map.lock().remove(account);
+                Ok(())
+            }
+        }
+
+        let fail_index_read = std::sync::Arc::new(Mutex::new(true));
+        let store = FlakyIndexStore {
+            map: Mutex::new(HashMap::from([
+                ("a".to_owned(), b"1".to_vec()),
+                ("b".to_owned(), b"2".to_vec()),
+                (INDEX_ACCOUNT.to_owned(), b"a\nb".to_vec()),
+            ])),
+            fail_index_read: fail_index_read.clone(),
+        };
+        let be = OsKeychainBackend::with_store(Box::new(store));
+
+        // `write` still succeeds — the authoritative store entry is written
+        // even though the index read underneath it is currently failing.
+        be.write(&BackendKey::new("c"), b"3").unwrap();
+        assert!(be.exists(&BackendKey::new("c")).unwrap());
+
+        // `list` is best-effort and reports empty while the index is
+        // unreadable.
+        assert!(be.list("").unwrap().is_empty());
+
+        // Recover the index read and confirm "a" and "b" are STILL indexed
+        // — the earlier write must not have persisted an empty/partial
+        // index while the read was failing. ("c", written during the
+        // outage, is legitimately absent — its insert was skipped, not
+        // silently lost data; a fresh `write` after recovery would index it.)
+        *fail_index_read.lock() = false;
+        let mut names: Vec<String> = be.list("").unwrap().into_iter().map(|k| k.0).collect();
+        names.sort();
+        assert_eq!(names, vec!["a".to_owned(), "b".to_owned()]);
     }
 
     /// **Proves:** the `Debug` impl redacts — no secret/service material.

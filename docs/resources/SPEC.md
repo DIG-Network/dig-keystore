@@ -309,7 +309,7 @@ impl OsKeychainBackend {
 
 **Enumeration (`list`).** OS credential stores expose no native key enumeration. `OsKeychainBackend` maintains a best-effort **index entry** (a reserved account) holding the set of live `BackendKey`s; `list(prefix)` filters it. `read`/`write`/`delete`/`exists` consult the credential store directly and are the source of truth — the index only powers `list`, so index/store drift can never corrupt a read or a write, only stale a listing. Index mutation is serialized within the process by a mutex.
 
-**Memory hygiene.** Secret bytes handled in-process are held in `Zeroizing` buffers and wiped on drop. `OsKeychainBackend`'s `Debug` impl redacts — no service, account, or secret material is ever printed.
+**Memory hygiene.** The index's in-process buffers (the joined key-name list read from and written to `INDEX_ACCOUNT`) are held in `Zeroizing` byte buffers and wiped on drop. The ciphertext blob itself — the argument to `write` and the return value of `read` — is passed through to/from the OS credential store untouched and is NOT zeroized here, matching `FileBackend` and the `KeychainBackend` trait contract: zeroizing the *decrypted* plaintext is the caller's (`Keystore`/`SignerHandle`) responsibility, not the backend's. `OsKeychainBackend`'s `Debug` impl redacts — no service, account, or secret material is ever printed.
 
 ### Planned future backends
 
