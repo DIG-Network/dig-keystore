@@ -34,6 +34,7 @@ master seed handled by DIG code goes through this crate.
 - Zeroization and other security properties — §12.
 - The `opaque` module — arbitrary-length password-sealed secrets, no `KeyScheme` — §15.
 - The `dig-keystore-wasm` WebAssembly binding (npm `@dignetwork/dig-keystore-wasm`) — §16.
+- The `hardware` module — binding at-rest key material to the OS hardware trusted component — §17.
 
 **Out of scope**
 
@@ -42,8 +43,10 @@ master seed handled by DIG code goes through this crate.
   `m/12381/8444/...` derivation on the exposed seed.
 - Password UX (prompts, confirmation loops). Binaries own their CLI.
 - Network I/O. The crate performs no I/O beyond the storage backend.
-- Hardware signers and OS keyrings. The `KeychainBackend` trait is designed to admit
-  them, but no such backend ships.
+- Hardware *signers* (a device that performs the signature itself, e.g. Ledger/YubiHSM).
+  The `KeychainBackend` trait is designed to admit them, but no such backend ships.
+  Hardware *binding of the wrapping key* — TPM / Secure Enclave — is in scope and
+  specified in §17.
 
 ---
 
@@ -754,3 +757,165 @@ extension's vault) depends on to prove old blobs stay readable across a native/w
 Test evidence: `wasm/tests/opaque_wasm.rs` (`wasm-bindgen-test`, run via `wasm-pack test
 --node`), cross-checked against `tests/opaque_vectors.rs`.
 
+
+---
+
+## 17. Hardware binding (`hardware`)
+
+The `hardware` module binds a keystore's wrapping key to the host's OS hardware trusted
+component, so that a sealed blob copied to another machine cannot be opened. It is a
+**tier above** the §3 file format, never a replacement for it.
+
+### 17.1 Invariants (normative)
+
+- **The §3 passphrase envelope is the FLOOR.** Hardware wrapping MUST be applied to an
+  already-sealed §3 blob. An implementation MUST NOT store a secret protected by hardware
+  alone. On a host with no usable hardware, the stored bytes MUST be the §3 blob
+  **verbatim** — never a bare secret, and never a re-encoding.
+- **The §3 format is unchanged.** No field is added, removed, renumbered, or repurposed.
+  Hardware wrapping is an outer envelope (§17.3) around the §3 bytes.
+- **Readers MUST accept every prior shape.** A stored blob that does not carry the §17.3
+  envelope magic MUST be returned to the caller untouched. This rule is stated over the
+  whole class of non-envelope prefixes — including inner magics a build does not
+  recognise — so a future inner format remains readable.
+- **The reported tier MUST be truthful, and it MUST be reported PER BLOB.** Two distinct
+  questions exist and an implementation MUST expose both, separately:
+  - **Host capability** — the tier every *newly written* blob will receive (`tier()`).
+  - **Stored key material** — what protects the blob at a given key (`blob_tier(key)`),
+    determined **from the stored bytes**, not from host capability.
+
+  These answers MUST be allowed to disagree, because on a hardware-capable host a keystore
+  written before hardware binding existed is still protected by the passphrase envelope
+  alone — and *does* open on another machine. **A caller that tells a user a specific key
+  is hardware-protected MUST use the per-blob answer.** Quoting host capability would
+  claim copy-resistance the key does not have, which could lead a user to guard the file
+  less carefully or choose a weaker passphrase. A capable host MUST NOT be treated as
+  retroactively protecting bytes already at rest; only rewriting the blob binds it.
+
+  An implementation MUST NOT report a hardware tier it has not verified. A software tier
+  MUST carry a reason distinguishing, at minimum, "no hardware present", "could not
+  determine whether hardware is present", and "this blob is not wrapped".
+- **The wrapping key MUST be non-exportable.** A provider MUST NOT report
+  `KeyCustody::NonExportable` unless the key was created non-exportable in the hardware
+  component and the platform refuses an export attempt. A provider whose key exists in
+  process memory MUST NOT be treated as a hardware tier.
+
+### 17.2 Tier resolution (normative order)
+
+Resolution happens **once**, when the backend is constructed, so the tier is a settled fact
+rather than a failure surfacing mid-`unlock`. A conforming implementation MUST:
+
+1. With no provider, resolve `Software(NotRequested)`.
+2. Otherwise probe the host. The probe MUST return one of three answers: `Available(kind)`,
+   `Absent` (a *confident* negative), or `Indeterminate` (the inspection itself failed — an
+   error, a timeout, or an empty or unintelligible response). A probe MUST NOT report
+   `Absent` when it means `Indeterminate`.
+3. On `Available(kind)`, **verify the claim by use** before reporting a hardware tier. A
+   probe is a claim, not a proof. Verification MUST reject: a provider whose declared kind
+   disagrees with the probed kind; a provider whose custody is not `NonExportable`; a wrap
+   that fails, returns nothing, or returns the content key verbatim; and an unwrap that
+   fails or does not reproduce the wrapped key. Any rejection yields `HardwareUnusable`,
+   never a hardware tier.
+4. Apply the policy to any negative outcome:
+
+| Policy | `Absent` | `Indeterminate` | `HardwareUnusable` | No provider |
+|---|---|---|---|---|
+| `Required` | error | error | error | error |
+| `Preferred` (default) | degrade | **error (fail closed)** | degrade | degrade |
+| `Optional` | degrade | degrade | degrade | degrade |
+
+`Preferred` MUST fail closed on `Indeterminate`: silently downgrading "could not determine"
+into "there is none" would strip hardware protection from a machine that has it on nothing
+more than a transient probe failure, and the resulting software blob would then be openable
+anywhere.
+
+### 17.3 Envelope format v1 (normative, byte level)
+
+All multi-byte integers are big-endian. There is no compression and no padding.
+
+```
+Offset      Size  Field          Value / semantics
+------      ----  -------------  ------------------------------------------------
+ 0           6    MAGIC          b"DIGHW1"
+ 6           2    ENV_VERSION    0x0001 (the only version this spec defines)
+ 8           1    HW_KIND        0x01 = Windows TPM 2.0 (CNG Platform Crypto Provider)
+                                 0x02 = Apple Secure Enclave
+                                 0x03 = Linux TPM 2.0
+ 9           1    CIPHER_ID      0x01 = AES-256-GCM (only assigned value)
+10          12    NONCE          random per write; AES-GCM nonce
+22           2    WRAPPED_LEN    u16 = W, length of WRAPPED_KEY; MUST be non-zero
+24           4    PAYLOAD_LEN    u32 = P, length of PAYLOAD
+28           W    WRAPPED_KEY    the 32-byte content key, encrypted to the hardware key
+28+W         P    PAYLOAD        AES-256-GCM(the §3 blob) || 16-byte tag
+28+W+P       4    CRC32          IEEE CRC-32 over ALL preceding bytes
+```
+
+- The fixed header is **28 bytes**. `HW_KIND` values are **append-only**: an id MUST NOT be
+  renumbered or repurposed, because it is recorded in permanent at-rest data.
+- An unassigned `HW_KIND` MUST NOT be silently defaulted to a known kind. It is a
+  forward-compatibility case — a blob sealed by hardware this build cannot name — and is
+  reported as unopenable here, not as corruption.
+- **AAD binding.** Bytes `0..28+W` (the fixed header *and* `WRAPPED_KEY`) MUST be supplied
+  as AES-GCM associated data at encrypt time, and the exact bytes read MUST be replayed at
+  decrypt time. Relabelling `HW_KIND`, editing a length, or substituting another machine's
+  wrapped key therefore invalidates the tag. No separate header MAC exists or is needed.
+- **CRC-32** is a fast-fail corruption check only; the AES-GCM tag is the security boundary.
+- `WRAPPED_LEN = 0` MUST be rejected: an envelope with no wrapped key asserts that no
+  hardware key protects it, and MUST NOT decode as a hardware envelope.
+
+### 17.4 Read and write behaviour (normative)
+
+- **Write, hardware tier.** Generate a fresh random 32-byte content key and nonce per write,
+  wrap the content key with the hardware key, and encode §17.3 around the §3 blob.
+- **Write, software tier.** Store the §3 blob unchanged.
+- **Read, no envelope prefix.** Return the bytes untouched (§17.1).
+- **Read, envelope present, hardware tier.** Decode structurally (length floor, CRC, magic,
+  version, cipher id, non-zero `WRAPPED_LEN`, declared-length agreement) before any hardware
+  round-trip, then require `HW_KIND` to match this host's component, then unwrap and decrypt.
+- **Read, envelope present, software tier.** MUST fail with a distinct error, and MUST NOT
+  return the envelope bytes: a blob copied to a machine without the sealing hardware must
+  fail loudly rather than be mistaken for a corrupt keystore.
+- **Failure to unwrap is the guarantee, not a malfunction.** A blob sealed by a *different
+  device* of the same class MUST fail to unwrap; a blob sealed by a *different class* of
+  component MUST be refused distinctly, since that is a migration case rather than a
+  copied-blob case.
+- **Three failure classes MUST stay distinct**, because they are different user stories:
+  a **hardware refusal** (the blob came from another machine — move the key), a
+  **structurally malformed envelope** (the bytes are broken — restore a backup), and an
+  **unrecognised hardware class** (a newer writer sealed it — upgrade this build). An
+  implementation MUST NOT report a malformed blob or an unnameable class as a hardware
+  refusal, or the refusal loses its meaning as the cross-machine guarantee.
+- **`blob_tier` MUST fail closed on a blob it cannot fully classify.** A structurally
+  invalid envelope, or one recording an unrecognised hardware class, MUST be an error —
+  never reported as software-protected. Reporting "software" for a blob that *is* wrapped
+  would be a lie in the reassuring direction; reporting "hardware" for a malformed blob
+  would be a lie in the dangerous one.
+
+### 17.5 Provider placement
+
+Platform bindings belong outside this package. `unsafe_code = "forbid"` is a spec-pinned
+property of this crate (§13.2, C-15), and CNG / Security Framework FFI cannot satisfy it, so
+providers MUST be implemented outside it and injected through the `HardwareProvider` trait.
+They are planned for a `hardware/` workspace member that will mirror the `wasm/` split
+(§16), tracked as dig_ecosystem #1693.
+
+**No provider ships as of 0.5.0.** This section specifies the contract a provider MUST
+satisfy; it does not describe shipped code. A caller that supplies none resolves
+`Software(NotRequested)`: honest, and explicitly not a claim of hardware protection.
+
+### 17.6 Conformance additions
+
+| # | Requirement | Spec |
+|---|---|---|
+| C-17 | Hardware wrapping is applied over a sealed §3 blob; the software tier stores those bytes verbatim | §17.1 |
+| C-18 | A blob without the `DIGHW1` prefix — any other prefix, known or not — is returned untouched | §17.1 |
+| C-19 | The reported tier is verified by a live wrap/unwrap self-test and a non-exportable custody check, never by the probe alone | §17.2 |
+| C-20 | `Absent` and `Indeterminate` are distinct probe answers; `Preferred` fails closed on `Indeterminate` | §17.2 |
+| C-21 | Envelope layout exactly per §17.3, header and wrapped key bound as AAD, `WRAPPED_LEN = 0` rejected | §17.3 |
+| C-22 | A blob sealed by another device or another hardware class does not open; an envelope on a host with no hardware tier errors rather than returning bytes | §17.4 |
+| C-23 | The per-blob tier is determined from the stored bytes and may disagree with host capability; an unwrapped blob on a capable host reports software with reason "blob not wrapped" | §17.1 |
+| C-24 | A hardware refusal, a malformed envelope, and an unrecognised hardware class are reported as three distinct errors; `blob_tier` fails closed on the latter two | §17.4 |
+
+Test evidence: `src/hardware/tests.rs` (tier resolution, fail-closed policy, cross-device
+binding, envelope codec) and `tests/hardware_v1_compat.rs` (committed golden v1 blobs
+decrypted in every tier).

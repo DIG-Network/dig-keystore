@@ -1,6 +1,6 @@
 [package]
 name = "dig-keystore"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 description = "Encrypted secret-key storage for DIG Network binaries (BLS signing + L1 wallet keys). AES-256-GCM + Argon2id, typed per-scheme magic files, zeroizing memory hygiene."
 license = "Apache-2.0 OR MIT"
@@ -16,7 +16,15 @@ categories = ["cryptography::cryptocurrencies"]
 include = [
     "src/**/*.rs",
     "tests/**/*.rs",
-    "docs/resources/SPEC.md",
+    "tests/fixtures/*.hex",
+    # The ROOT spec, and ONLY it. Previously `docs/resources/SPEC.md` was packaged
+    # instead — a stale duplicate (dig_ecosystem #1695) predating several sections,
+    # so crates.io/docs.rs readers got a spec whose §17 did not exist while the
+    # rendered module docs cited it (§4.2: the shipped spec must be the normative
+    # one). The leading slash is load-bearing: `include` patterns are
+    # gitignore-style, so an unanchored "SPEC.md" ALSO matches the nested duplicate
+    # at any depth and would ship both. Verify with `cargo package --list`.
+    "/SPEC.md",
     "Cargo.toml",
     "Cargo.lock",
     "README.md",
@@ -137,4 +145,9 @@ required-features = ["testing"]
 [[test]]
 name = "keystore_branches"
 path = "tests/keystore_branches.rs"
+required-features = ["testing"]
+
+[[test]]
+name = "hardware_v1_compat"
+path = "tests/hardware_v1_compat.rs"
 required-features = ["testing"]

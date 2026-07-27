@@ -25,6 +25,11 @@ pub type Result<T> = std::result::Result<T, KeystoreError>;
 /// The enum is [`Clone`] so errors can be fanned out through broadcast channels
 /// or bubbled through async traits. The only non-Clone primitive (`std::io::Error`)
 /// is wrapped in `Arc` to preserve clonability.
+///
+/// `#[non_exhaustive]`: this catalog grows as the crate gains capability (six
+/// variants arrived with hardware binding alone), so downstream `match`es must
+/// carry a wildcard arm rather than break on every addition.
+#[non_exhaustive]
 #[derive(Error, Debug, Clone)]
 pub enum KeystoreError {
     /// An underlying backend I/O operation failed.
@@ -167,6 +172,102 @@ pub enum KeystoreError {
         claimed: usize,
         /// Bytes actually available.
         available: usize,
+    },
+
+    /// The caller required hardware binding, and this host cannot provide it.
+    ///
+    /// Raised by [`HardwarePolicy::Required`](crate::hardware::HardwarePolicy)
+    /// rather than degrading. The
+    /// [`DegradeReason`](crate::hardware::DegradeReason) says which negative
+    /// outcome occurred — "no TPM on this machine" and "the TPM is present but
+    /// unusable" lead a caller to different remedies.
+    #[error("hardware binding required but unavailable: {reason}")]
+    HardwareRequired {
+        /// Why hardware binding could not be established.
+        reason: crate::hardware::DegradeReason,
+    },
+
+    /// The host could not be inspected, so hardware availability is **unknown**.
+    ///
+    /// Deliberately distinct from a confident "no hardware present": collapsing
+    /// the two would turn an inspection failure into a confident negative, and a
+    /// transient probe failure would then silently strip hardware protection
+    /// from a machine that has it. Under the default
+    /// [`Preferred`](crate::hardware::HardwarePolicy::Preferred) policy this
+    /// fails closed instead of degrading.
+    #[error("could not determine hardware availability: {detail}")]
+    HardwareProbeIndeterminate {
+        /// Non-secret detail of the probe failure.
+        detail: String,
+    },
+
+    /// The hardware component refused to wrap a content key.
+    #[error("hardware wrap failed: {detail}")]
+    HardwareWrapFailed {
+        /// Non-secret detail of the failing operation.
+        detail: String,
+    },
+
+    /// The hardware component could not unwrap a stored content key.
+    ///
+    /// This variant means exactly one thing: **the hardware refused**. It is the
+    /// expected error when a sealed blob is copied to a *different machine* —
+    /// the wrapping key is non-exportable, so the copy cannot be opened — and
+    /// that refusal is the guarantee, not a malfunction. Structural problems
+    /// with the blob ([`MalformedEnvelope`](Self::MalformedEnvelope)) and
+    /// unnameable hardware ([`UnknownHardwareClass`](Self::UnknownHardwareClass))
+    /// are deliberately *not* reported here, so this variant keeps its meaning.
+    #[error("hardware unwrap failed: {detail}")]
+    HardwareUnwrapFailed {
+        /// Non-secret detail of the failing operation.
+        detail: String,
+    },
+
+    /// A hardware envelope is structurally invalid.
+    ///
+    /// A malformed blob, not a hardware refusal. Notably covers an envelope
+    /// declaring a zero-length wrapped key — which asserts that no hardware key
+    /// protects it, and so must never decode as a hardware envelope.
+    #[error("malformed hardware envelope: {detail}")]
+    MalformedEnvelope {
+        /// Non-secret detail of the structural violation.
+        detail: String,
+    },
+
+    /// A hardware envelope records a hardware class this build cannot name.
+    ///
+    /// A **forward-compatibility** case, not corruption: a newer writer may have
+    /// sealed with hardware this build has no name for. Reported rather than
+    /// guessed, so an unknown class can never be silently treated as a known one
+    /// — or as unprotected.
+    #[error("blob was sealed by an unrecognised hardware class (wire id {wire_id:#04x})")]
+    UnknownHardwareClass {
+        /// The hardware-kind wire id read from the blob.
+        wire_id: u8,
+    },
+
+    /// A hardware-wrapped blob was found on a host with no hardware tier.
+    ///
+    /// Reported instead of returning the envelope bytes, so a copied blob fails
+    /// loudly rather than being mistaken for a corrupt keystore.
+    #[error("blob is hardware-bound but this host is not ({tier})")]
+    NotHardwareBound {
+        /// The tier this host actually has.
+        tier: String,
+    },
+
+    /// A hardware-wrapped blob was sealed by a different class of hardware.
+    ///
+    /// Distinct from [`HardwareUnwrapFailed`](Self::HardwareUnwrapFailed), which
+    /// is another *device* of the same class: this is another *kind* of
+    /// component (a blob from a Mac read on Windows), which is a migration case
+    /// rather than a copied-blob case.
+    #[error("blob was sealed by {found}, this host has {expected}")]
+    HardwareKindMismatch {
+        /// The hardware class this host binds to.
+        expected: &'static str,
+        /// The hardware class recorded in the blob.
+        found: &'static str,
     },
 }
 

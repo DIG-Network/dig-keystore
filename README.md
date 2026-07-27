@@ -534,6 +534,110 @@ In-process `parking_lot::Mutex<HashMap<BackendKey, Vec<u8>>>`. `KeychainBackend`
 
 **Use in tests only.** Not compiled without the `testing` feature.
 
+### `HardwareBoundBackend` (module `hardware`)
+
+Binds stored key material to the host's OS hardware trusted component — Windows TPM 2.0,
+Apple Secure Enclave, or Linux TPM 2.0 — so a sealed blob copied to another machine cannot
+be opened. It is a **tier above** the other backends, not a replacement: it decorates one.
+
+> **No platform provider ships in 0.5.0.** This release provides the seam, the envelope and
+> the tier semantics; nothing here binds to a real TPM or Secure Enclave yet. Unless you
+> supply your own `HardwareProvider`, every host resolves
+> `Software(NotRequested)` — honest by construction, but **not** hardware protection.
+> Providers are tracked as dig_ecosystem #1693.
+
+```rust
+pub struct HardwareBoundBackend { /* … */ }
+impl HardwareBoundBackend {
+    pub fn new<B: KeychainBackend>(
+        inner: B,
+        provider: Option<Arc<dyn HardwareProvider>>,
+        policy: HardwarePolicy,
+    ) -> Result<Self>;
+    pub fn with_inner(
+        inner: Arc<dyn KeychainBackend>,
+        provider: Option<Arc<dyn HardwareProvider>>,
+        policy: HardwarePolicy,
+    ) -> Result<Self>;
+    pub fn tier(&self) -> &ProtectionTier;
+    pub fn blob_tier(&self, key: &BackendKey) -> Result<ProtectionTier>;
+    pub fn inner(&self) -> &Arc<dyn KeychainBackend>;
+}
+```
+
+The AES-256-GCM + Argon2id file envelope stays the **floor**. Hardware wrapping is an outer
+`DIGHW1` envelope around an already-sealed blob, so a host without hardware writes exactly
+the bytes it always wrote — never a bare secret. The v1 format is untouched, and any blob
+that is not a `DIGHW1` envelope is read back unchanged, so existing keystores keep opening.
+
+#### Ask per BLOB before you claim
+
+Never assume hardware protection is in effect, and be careful *which* question you ask —
+there are two, and they can legitimately disagree:
+
+| Method | Answers |
+|---|---|
+| `tier()` | what this **host** is capable of — the tier every *newly written* blob gets |
+| `blob_tier(key)` | what protects **the key stored at `key`**, read from the stored bytes |
+
+**Use `blob_tier` for anything a user sees.** A hardware-capable host can hold a keystore
+written before hardware binding existed: `tier()` reports `Hardware`, but that blob is
+protected by the passphrase alone and *does* open on another machine. Quoting `tier()` there
+would tell the user they have copy-resistance they do not have. A capable host does not
+retroactively protect bytes already at rest — only rewriting the blob binds it.
+
+```rust
+match backend.blob_tier(&key)? {
+    ProtectionTier::Hardware(kind) => println!("this key is bound to {kind}"),
+    // The reason is part of the variant — there is no way to report a degrade
+    // without saying why. `BlobNotWrapped` is the legacy-keystore case.
+    ProtectionTier::Software(reason) => println!("software-wrapped: {reason}"),
+}
+```
+
+`blob_tier` reports the blob's **own** sealing class, independent of this host — a blob from
+a Mac reads as `Hardware(MacSecureEnclave)` even on Windows. Whether *this* host can open it
+is a separate question, answered by `read`. It fails closed on a blob it cannot fully
+classify (malformed envelope, or a hardware class this build cannot name) rather than
+reporting it as software-protected.
+
+#### Two questions, two answers
+
+"Is hardware present?" and "could I determine whether hardware is present?" are different
+facts, so `HardwareProbe` is three-valued (`Available` / `Absent` / `Indeterminate`) and the
+policy decides what each means:
+
+| `HardwarePolicy` | `Absent` | `Indeterminate` | Unusable | No provider |
+|---|---|---|---|---|
+| `Required` | error | error | error | error |
+| `Preferred` (default) | degrade | **error** | degrade | degrade |
+| `Optional` | degrade | degrade | degrade | degrade |
+
+`Preferred` fails closed on `Indeterminate` on purpose: treating "I could not tell" as
+"there is none" would let a transient probe failure quietly strip hardware protection from a
+machine that has it.
+
+#### A probe is a claim, not a proof
+
+A provider is never taken at its word. Before reporting a hardware tier the backend runs a
+live wrap/unwrap self-test and requires `KeyCustody::NonExportable`, so a provider that
+probes available but cannot wrap, "wraps" by returning the key verbatim, or holds its key in
+process memory is refuted and reported as `HardwareUnusable`.
+
+#### Supplying hardware
+
+This crate forbids `unsafe` code as a spec-pinned security property (`SPEC.md` §13.2,
+conformance C-15), which CNG and Security Framework FFI cannot satisfy. Platform providers
+therefore cannot live here; they are **planned** for a separate `hardware/` workspace member
+that will mirror the `wasm/` split (dig_ecosystem #1693) and will be injected through the
+`HardwareProvider` trait. Passing `provider = None` resolves `Software(NotRequested)`:
+honest, and explicitly not a claim of hardware protection.
+
+`FakeDevice` (module `hardware::double`, feature `testing`) is a configurable provider
+double for dependents' tests. It models cross-machine binding structurally — its device key
+never enters an envelope — and can be made to lie in several ways at once, which is what the
+self-test above is tested against.
+
 ---
 
 ## `Password`
