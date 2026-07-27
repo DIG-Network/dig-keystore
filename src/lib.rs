@@ -62,6 +62,7 @@ pub mod backend;
 mod cipher;
 mod error;
 mod format;
+pub mod hardware;
 mod kdf;
 mod keystore;
 pub mod opaque;
@@ -80,6 +81,10 @@ pub use backend::{BackendKey, KeychainBackend};
 
 pub use error::{KeystoreError, Result};
 pub use format::{CipherId, KdfId, KdfParams, KeystoreHeader, FORMAT_VERSION_V1};
+pub use hardware::{
+    DegradeReason, HardwareBoundBackend, HardwareKind, HardwarePolicy, HardwareProbe,
+    HardwareProvider, KeyCustody, ProtectionTier,
+};
 pub use keystore::Keystore;
 pub use password::Password;
 pub use scheme::{BlsSigning, KeyScheme, L1WalletBls};
