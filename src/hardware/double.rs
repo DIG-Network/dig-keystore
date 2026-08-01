@@ -78,7 +78,20 @@ pub struct FakeDevice {
     behaviour: WrapBehaviour,
     /// Per-device key. Never leaves this struct and is never written into an
     /// envelope — this is what makes one device's blobs unopenable by another.
-    device_key: [u8; 32],
+    ///
+    /// Shared and mutable so a clone of the device observes a
+    /// [`rotate_device_key`](FakeDevice::rotate_device_key) — the double's model
+    /// of a trusted component being CLEARED while the same handle is held.
+    device_key: Arc<Mutex<[u8; 32]>>,
+    /// How many more `unwrap_key` calls succeed before the device stops
+    /// unwrapping, or `None` for a device that always works.
+    ///
+    /// A device that is broken from the start is refuted by the constructor
+    /// self-test and never reaches the operations under test, so expressing
+    /// "honest at construction, broken afterwards" needs a budget rather than
+    /// another [`WrapBehaviour`] variant. Shared like the key, for the same
+    /// reason.
+    unwraps_left: Arc<Mutex<Option<usize>>>,
     /// The last content key this device was asked to wrap.
     ///
     /// Serves two purposes: it lets a test assert that the plaintext content key
@@ -98,7 +111,8 @@ impl FakeDevice {
             probe: HardwareProbe::Available(kind),
             custody: KeyCustody::NonExportable,
             behaviour: WrapBehaviour::Honest,
-            device_key: [device_id; 32],
+            device_key: Arc::new(Mutex::new([device_id; 32])),
+            unwraps_left: Arc::default(),
             last_wrapped: Arc::default(),
         }
     }
@@ -153,6 +167,27 @@ impl FakeDevice {
         self
     }
 
+    /// Replace this device's key material, as a TPM clear / re-enrolment does.
+    ///
+    /// Blobs sealed before the rotation become unopenable by this device, which
+    /// is precisely what a user sees after a firmware update clears the TPM.
+    /// Clones share the slot, so a backend already holding this provider sees
+    /// the change.
+    pub fn rotate_device_key(&self, device_id: u8) {
+        *self.device_key.lock() = [device_id; 32];
+    }
+
+    /// Succeed at `n` more unwraps, then fail every one after that.
+    ///
+    /// Models a component that is healthy when inspected and unusable moments
+    /// later. The constructor self-test spends exactly one unwrap, so
+    /// `failing_unwrap_after(1)` yields a device that resolves a genuine
+    /// hardware tier and then cannot reopen the next thing it seals.
+    pub fn failing_unwrap_after(self, n: usize) -> Self {
+        *self.unwraps_left.lock() = Some(n);
+        self
+    }
+
     /// Length of the per-wrap nonce prefixed to a wrapped blob.
     const NONCE_LEN: usize = 12;
 
@@ -194,8 +229,8 @@ impl HardwareProvider for FakeDevice {
             _ => {
                 // nonce || AES-256-GCM(content key) under the device key.
                 let nonce = Self::fresh_nonce();
-                let sealed =
-                    cipher::encrypt(&self.device_key, &nonce, content_key.as_slice(), b"")?;
+                let device_key = *self.device_key.lock();
+                let sealed = cipher::encrypt(&device_key, &nonce, content_key.as_slice(), b"")?;
                 let mut out = Vec::with_capacity(nonce.len() + sealed.len());
                 out.extend_from_slice(&nonce);
                 out.extend_from_slice(&sealed);
@@ -205,6 +240,20 @@ impl HardwareProvider for FakeDevice {
     }
 
     fn unwrap_key(&self, wrapped: &[u8]) -> Result<ContentKey> {
+        // Spend the unwrap budget first: an exhausted device refuses regardless
+        // of behaviour, which is what makes "healthy at construction, broken
+        // afterwards" expressible.
+        {
+            let mut left = self.unwraps_left.lock();
+            if let Some(remaining) = left.as_mut() {
+                if *remaining == 0 {
+                    return Err(KeystoreError::HardwareUnwrapFailed {
+                        detail: "fake device stopped unwrapping".to_owned(),
+                    });
+                }
+                *remaining -= 1;
+            }
+        }
         match self.behaviour {
             WrapBehaviour::FailUnwrap => {
                 return Err(KeystoreError::HardwareUnwrapFailed {
@@ -248,7 +297,8 @@ impl HardwareProvider for FakeDevice {
 
         // A blob sealed by a *different* device key fails here — the
         // cross-machine binding guarantee.
-        let plain = cipher::decrypt(&self.device_key, &nonce, sealed, b"").map_err(|_| {
+        let device_key = *self.device_key.lock();
+        let plain = cipher::decrypt(&device_key, &nonce, sealed, b"").map_err(|_| {
             KeystoreError::HardwareUnwrapFailed {
                 detail: "wrapped key was not sealed by this device".to_owned(),
             }

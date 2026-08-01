@@ -1364,3 +1364,263 @@ fn enumeration_and_deletion_delegate_in_both_tiers() {
         assert!(be.exists(&b).unwrap());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Reversible binding — losing the hardware must not strand a seed (#1502).
+// ---------------------------------------------------------------------------
+
+/// **Proves:** `unbind` returns a hardware-bound blob to the portable software
+/// form, so a host that no longer has the sealing hardware can still open it.
+///
+/// **Why it matters:** hardware binding makes the trusted component a SECOND
+/// required factor. A TPM is cleared by a firmware update, a board swap, or a
+/// BIOS reset — ordinary events. Without a way back, the correct passphrase
+/// stops being enough and the seed is gone. This is the escape hatch, and it
+/// must be taken while the hardware still answers.
+///
+/// **Catches:** the obvious wrong implementation — writing the unwrapped bytes
+/// through `self.write`, which in the hardware tier RE-WRAPS them, reporting
+/// success while the blob stays bound. The fixture can see that because it
+/// re-reads through a backend with NO provider (the machine whose TPM is gone),
+/// not through the backend that did the unbinding.
+#[test]
+fn unbind_returns_the_blob_to_a_form_a_machine_without_the_hardware_can_open() {
+    let inner = Arc::new(MemoryBackend::default());
+    let key = BackendKey::new("identity");
+    let blob = v1_shaped_blob(0x33);
+
+    let bound = HardwareBoundBackend::with_inner(
+        inner.clone(),
+        Some(Arc::new(FakeDevice::working(HardwareKind::WindowsTpm20, 7))),
+        HardwarePolicy::Required,
+    )
+    .unwrap();
+    bound.write(&key, &blob).unwrap();
+    assert!(
+        envelope::is_envelope(&inner.read(&key).unwrap()),
+        "precondition: the blob really is hardware-bound"
+    );
+
+    let tier = bound
+        .unbind(&key)
+        .expect("unbind while the hardware answers");
+    assert_eq!(
+        tier,
+        ProtectionTier::Software(DegradeReason::BlobNotWrapped)
+    );
+
+    // The machine whose hardware is gone. It shares the storage and has no
+    // provider at all — exactly the post-TPM-clear situation.
+    let stranded = HardwareBoundBackend::with_inner(inner.clone(), None, HardwarePolicy::Optional)
+        .expect("a host with no hardware still opens");
+    assert_eq!(
+        stranded.read(&key).unwrap(),
+        blob,
+        "after unbind the sealed keystore must open without the hardware"
+    );
+    assert_eq!(
+        stranded.blob_tier(&key).unwrap(),
+        ProtectionTier::Software(DegradeReason::BlobNotWrapped),
+        "and it reports the protection it actually has, not the one it had"
+    );
+}
+
+/// **Proves:** `bind` migrates an existing unwrapped keystore UP to hardware,
+/// and binding an already-bound blob is idempotent rather than double-wrapping.
+///
+/// **Why it matters:** every keystore written before this feature is unwrapped.
+/// Without an explicit migration the only way to bind one is to rewrite it, and
+/// a second `bind` that nested a second envelope would produce a blob whose
+/// single unwrap yields another envelope — openable by nothing.
+///
+/// **Catches:** a `bind` that skips the already-an-envelope check.
+#[test]
+fn bind_migrates_a_legacy_blob_up_and_is_idempotent() {
+    let inner = Arc::new(MemoryBackend::default());
+    let key = BackendKey::new("identity");
+    let blob = v1_shaped_blob(0x44);
+    // A legacy blob, written before hardware binding existed.
+    inner.write(&key, &blob).unwrap();
+
+    let be = HardwareBoundBackend::with_inner(
+        inner.clone(),
+        Some(Arc::new(FakeDevice::working(HardwareKind::LinuxTpm20, 9))),
+        HardwarePolicy::Required,
+    )
+    .unwrap();
+    assert_eq!(
+        be.blob_tier(&key).unwrap(),
+        ProtectionTier::Software(DegradeReason::BlobNotWrapped),
+        "precondition: a capable host does not retroactively protect old bytes"
+    );
+
+    let tier = be.bind(&key).expect("migrate up");
+    assert_eq!(tier, ProtectionTier::Hardware(HardwareKind::LinuxTpm20));
+    assert_eq!(be.read(&key).unwrap(), blob, "and it still opens here");
+
+    // Idempotent: a second bind must not nest a second envelope.
+    let again = be
+        .bind(&key)
+        .expect("binding an already-bound blob is a no-op");
+    assert_eq!(again, ProtectionTier::Hardware(HardwareKind::LinuxTpm20));
+    assert_eq!(
+        be.read(&key).unwrap(),
+        blob,
+        "one unwrap must still reach the keystore, not a second envelope"
+    );
+}
+
+/// **Proves:** when `bind` cannot prove the newly-sealed blob reopens, it
+/// RESTORES the previous bytes and fails, rather than leaving storage holding a
+/// blob nothing can open.
+///
+/// **Why it matters:** `bind` overwrites the only copy. If the wrap is not
+/// actually recoverable, a bind that returned success would have destroyed the
+/// seed while reporting that it had protected it. dig-app's 5.x migration
+/// learned exactly this: read from the account's own vault, and be able to put
+/// the prior seal back.
+///
+/// **Fixture:** a device that passes the constructor self-test and only then
+/// stops unwrapping — the self-test's own round-trip is unwrap #1, so a device
+/// failing from unwrap #2 is honest at construction and broken at verification.
+/// A device that failed from the start would degrade to software at
+/// construction and never reach `bind` at all, which is why the ordinary
+/// `FailUnwrap` fixture cannot express this.
+#[test]
+fn a_bind_that_cannot_be_reopened_restores_the_previous_bytes() {
+    let inner = Arc::new(MemoryBackend::default());
+    let key = BackendKey::new("identity");
+    let blob = v1_shaped_blob(0x55);
+    inner.write(&key, &blob).unwrap();
+
+    let be = HardwareBoundBackend::with_inner(
+        inner.clone(),
+        Some(Arc::new(
+            FakeDevice::working(HardwareKind::WindowsTpm20, 3).failing_unwrap_after(1),
+        )),
+        HardwarePolicy::Required,
+    )
+    .expect("the device is honest at construction");
+
+    let err = be
+        .bind(&key)
+        .expect_err("a seal that cannot be reopened must not be committed");
+    assert!(
+        matches!(err, KeystoreError::HardwareUnwrapFailed { .. }),
+        "it reports the hardware failing to reopen its own seal: {err}"
+    );
+    assert_eq!(
+        inner.read(&key).unwrap(),
+        blob,
+        "the previous, openable bytes are restored — bind is all-or-nothing"
+    );
+}
+
+/// **Proves:** `unbind` leaves the stored blob untouched when the hardware can
+/// no longer open it.
+///
+/// **Why it matters:** this is the too-late case — the TPM is already gone. The
+/// blob is unrecoverable, and that is by design, but `unbind` must not make it
+/// WORSE by overwriting the envelope with anything. If the hardware is restored
+/// (a re-enrolled key, a swapped-back board), the bytes must still be there.
+///
+/// **Catches:** an implementation that truncates or writes before it has the
+/// plaintext in hand.
+#[test]
+fn unbind_leaves_the_blob_intact_when_the_hardware_can_no_longer_open_it() {
+    let inner = Arc::new(MemoryBackend::default());
+    let key = BackendKey::new("identity");
+    let blob = v1_shaped_blob(0x66);
+
+    let device = FakeDevice::working(HardwareKind::MacSecureEnclave, 0x5E);
+    let be = HardwareBoundBackend::with_inner(
+        inner.clone(),
+        Some(Arc::new(device.clone())),
+        HardwarePolicy::Required,
+    )
+    .unwrap();
+    be.write(&key, &blob).unwrap();
+    let sealed = inner.read(&key).unwrap();
+
+    // The trusted component is cleared: same device, different key material.
+    device.rotate_device_key(0x99);
+
+    let err = be
+        .unbind(&key)
+        .expect_err("the cleared hardware cannot open its own envelope");
+    assert!(matches!(err, KeystoreError::HardwareUnwrapFailed { .. }));
+    assert_eq!(
+        inner.read(&key).unwrap(),
+        sealed,
+        "a failed unbind must not disturb the stored bytes"
+    );
+}
+
+/// **Proves:** `unbind` fails when storage silently did not take the write.
+///
+/// **Why it matters:** `unbind` exists so a user can safely retire the trusted
+/// component. Reporting "unbound" over a store that kept the envelope is the
+/// one failure with a catastrophic follow-on action: the user, believing the
+/// seed is portable, clears the TPM — and only then discovers it is not.
+///
+/// **Catches:** an implementation that trusts its own write. The fixture is a
+/// store whose `write` succeeds and does nothing, which is what a full disk or
+/// a read-only mount looks like from here.
+#[test]
+fn unbind_refuses_to_report_success_when_the_store_kept_the_envelope() {
+    /// Storage that accepts writes and silently discards them.
+    struct WriteDroppingStore(MemoryBackend);
+
+    impl KeychainBackend for WriteDroppingStore {
+        fn read(&self, key: &BackendKey) -> crate::Result<Vec<u8>> {
+            self.0.read(key)
+        }
+        fn write(&self, _key: &BackendKey, _data: &[u8]) -> crate::Result<()> {
+            Ok(()) // accepted, never stored
+        }
+        fn delete(&self, key: &BackendKey) -> crate::Result<()> {
+            self.0.delete(key)
+        }
+        fn list(&self, prefix: &str) -> crate::Result<Vec<BackendKey>> {
+            self.0.list(prefix)
+        }
+        fn exists(&self, key: &BackendKey) -> crate::Result<bool> {
+            self.0.exists(key)
+        }
+    }
+
+    let key = BackendKey::new("identity");
+    let blob = v1_shaped_blob(0x77);
+    let device = FakeDevice::working(HardwareKind::LinuxTpm20, 0x21);
+
+    // Seal into staging storage first, then present that same envelope through a
+    // store that will not accept the unbinding write.
+    let staging = Arc::new(MemoryBackend::default());
+    let sealer = HardwareBoundBackend::with_inner(
+        staging.clone(),
+        Some(Arc::new(device.clone())),
+        HardwarePolicy::Required,
+    )
+    .unwrap();
+    sealer.write(&key, &blob).unwrap();
+    let sealed = staging.read(&key).unwrap();
+
+    let real = MemoryBackend::default();
+    real.write(&key, &sealed).unwrap();
+
+    let be = HardwareBoundBackend::with_inner(
+        Arc::new(WriteDroppingStore(real)),
+        Some(Arc::new(device)),
+        HardwarePolicy::Required,
+    )
+    .unwrap();
+
+    let err = be
+        .unbind(&key)
+        .expect_err("a store that kept the envelope must not read as unbound");
+    assert!(
+        err.to_string().contains("still hardware-bound"),
+        "the error says the blob is STILL bound, so the user does not retire the \
+         trusted component on the strength of it: {err}"
+    );
+}

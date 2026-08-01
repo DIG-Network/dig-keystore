@@ -174,6 +174,138 @@ impl HardwareBoundBackend {
         &self.inner
     }
 
+    /// Return the key at `key` to the portable software form, so it opens on a
+    /// host that no longer has this hardware. Returns the tier the blob is in
+    /// afterwards.
+    ///
+    /// # Why this exists
+    ///
+    /// Hardware binding makes the trusted component a **second required
+    /// factor**. A TPM is cleared by a firmware update, a mainboard swap or a
+    /// BIOS reset — routine events — and after one the correct passphrase is no
+    /// longer enough: the sealed blob is unopenable, by design and permanently.
+    /// `unbind` is the way back, and it **must be taken while the hardware still
+    /// answers**. There is no recovery afterwards; that is what non-exportable
+    /// custody means.
+    ///
+    /// Unbinding does not expose a secret. What it stores is the AES-256-GCM +
+    /// Argon2id passphrase envelope that was always the floor (`SPEC.md` §3) —
+    /// the same bytes a host with no hardware writes. It gives up cross-machine
+    /// binding, nothing else.
+    ///
+    /// Nothing is written until the plaintext is in hand, and the result is
+    /// verified from storage before this reports success: telling a user their
+    /// seed is portable when it is not is the one failure here with a
+    /// catastrophic follow-on action, since they may then clear the TPM.
+    ///
+    /// # Errors
+    ///
+    /// - [`KeystoreError::NotHardwareBound`] — the blob is wrapped but this
+    ///   backend has no provider to open it (the hardware is already gone).
+    /// - [`KeystoreError::HardwareUnwrapFailed`] — the hardware would not open
+    ///   it. The stored bytes are left exactly as they were.
+    /// - [`KeystoreError::HardwareStillBound`] — the write did not take.
+    pub fn unbind(&self, key: &BackendKey) -> Result<ProtectionTier> {
+        let bytes = self.inner.read(key)?;
+        if !envelope::is_envelope(&bytes) {
+            return Ok(ProtectionTier::Software(DegradeReason::BlobNotWrapped));
+        }
+
+        let provider = self
+            .provider
+            .as_deref()
+            .ok_or_else(|| KeystoreError::NotHardwareBound {
+                tier: self.tier.to_string(),
+            })?;
+
+        // Unwrap BEFORE writing anything: a failure here must leave the envelope
+        // untouched, so hardware that comes back (a swapped-back board, a
+        // re-enrolled key) still finds the blob it sealed.
+        let plain = self.unwrap_blob(provider, &bytes)?;
+
+        // Write through `inner`, NOT through `self.write` — which, in the
+        // hardware tier, would seal these bytes straight back into a new
+        // envelope and report a successful unbind that changed nothing.
+        self.inner.write(key, &plain)?;
+
+        // Confirm from storage. A store that accepts a write and keeps the old
+        // bytes (a full disk, a read-only mount) would otherwise leave the user
+        // believing it is safe to retire the trusted component.
+        if envelope::is_envelope(&self.inner.read(key)?) {
+            return Err(KeystoreError::HardwareStillBound { key: key.0.clone() });
+        }
+        Ok(ProtectionTier::Software(DegradeReason::BlobNotWrapped))
+    }
+
+    /// Bind the key at `key` to this host's hardware, migrating a blob written
+    /// before hardware binding existed. Returns the tier the blob is in
+    /// afterwards.
+    ///
+    /// Already-bound blobs are left alone: sealing an envelope inside a second
+    /// envelope would produce a blob whose unwrap yields another envelope, which
+    /// nothing can open.
+    ///
+    /// **This is the operation that can strand a seed**, because it overwrites
+    /// the only copy with bytes only this hardware can open. So the new blob is
+    /// read back from storage and reopened through the hardware BEFORE the call
+    /// reports success, and the previous bytes are restored if it cannot be. See
+    /// [`unbind`](Self::unbind) for the way back out.
+    ///
+    /// # Errors
+    ///
+    /// - [`KeystoreError::NotHardwareBound`] — this backend resolved a software
+    ///   tier, so there is no hardware to bind to.
+    /// - [`KeystoreError::HardwareWrapFailed`] / [`KeystoreError::HardwareUnwrapFailed`]
+    ///   — the seal could not be made, or could not be proven reopenable. The
+    ///   previous bytes are restored in both cases.
+    pub fn bind(&self, key: &BackendKey) -> Result<ProtectionTier> {
+        let bytes = self.inner.read(key)?;
+        let provider = self
+            .provider
+            .as_deref()
+            .ok_or_else(|| KeystoreError::NotHardwareBound {
+                tier: self.tier.to_string(),
+            })?;
+
+        if envelope::is_envelope(&bytes) {
+            return Ok(ProtectionTier::Hardware(provider.kind()));
+        }
+
+        let sealed = self.wrap_blob(provider, &bytes)?;
+        self.inner.write(key, &sealed)?;
+
+        // Prove the migration from STORAGE, not from the value just computed: a
+        // seal this hardware cannot reopen has destroyed the only copy, and a
+        // success returned over that is the worst outcome this module has.
+        match self.reopens_to(provider, key, &bytes) {
+            Ok(()) => Ok(ProtectionTier::Hardware(provider.kind())),
+            Err(e) => {
+                // Put the openable bytes back. The restore is best-effort, but
+                // its failure must not mask the reason the bind was rejected.
+                let _ = self.inner.write(key, &bytes);
+                Err(e)
+            }
+        }
+    }
+
+    /// Whether the blob now stored at `key` unwraps, through the hardware, to
+    /// exactly `expected`.
+    fn reopens_to(
+        &self,
+        provider: &dyn HardwareProvider,
+        key: &BackendKey,
+        expected: &[u8],
+    ) -> Result<()> {
+        let stored = self.inner.read(key)?;
+        let reopened = self.unwrap_blob(provider, &stored)?;
+        if reopened != expected {
+            return Err(KeystoreError::HardwareUnwrapFailed {
+                detail: "the newly sealed blob did not reopen to the original bytes".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     /// Seal `blob` into a hardware envelope. Only reachable in the hardware tier.
     fn wrap_blob(&self, provider: &dyn HardwareProvider, blob: &[u8]) -> Result<Vec<u8>> {
         let mut rng = rand_core::OsRng;
