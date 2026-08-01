@@ -903,6 +903,39 @@ They are planned for a `hardware/` workspace member that will mirror the `wasm/`
 satisfy; it does not describe shipped code. A caller that supplies none resolves
 `Software(NotRequested)`: honest, and explicitly not a claim of hardware protection.
 
+### 17.5a Binding is REVERSIBLE (normative)
+
+Hardware binding makes the trusted component a **second required factor**. A TPM is cleared
+by a firmware update, a mainboard swap or a BIOS reset; a Secure Enclave is lost with the
+device. After any of those the correct passphrase is no longer sufficient and the sealed
+blob is permanently unopenable — that is what non-exportable custody means, and it MUST NOT
+be reachable without a way back that the user can take in advance.
+
+An implementation MUST therefore provide both migrations, and they MUST hold these
+properties:
+
+- **`unbind(key)` — down to the portable form.** Rewrites the stored blob as the §3
+  passphrase envelope, which a host with no hardware opens. It discloses no secret: those
+  are the same bytes the software tier always writes; only cross-machine binding is given
+  up. It MUST be possible while the hardware still answers, and there is NO recovery after
+  the hardware is gone.
+- **`bind(key)` — up to hardware.** Migrates a blob written before hardware binding existed.
+  Binding an already-wrapped blob MUST be a no-op: nesting a second envelope yields a blob
+  whose unwrap produces another envelope, which nothing opens.
+- **Never write before the plaintext is in hand (MUST).** A failed `unbind` MUST leave the
+  stored bytes byte-identical, so hardware that returns still finds the blob it sealed.
+- **Prove a bind from STORAGE before reporting success (MUST).** `bind` overwrites the only
+  copy with bytes only this hardware can open. The implementation MUST re-read the stored
+  blob and reopen it through the hardware to the original bytes, and MUST restore the
+  previous bytes if it cannot. A success returned over a seal that does not reopen has
+  destroyed the key material while reporting that it protected it.
+- **Prove an unbind from STORAGE before reporting success (MUST).** A store that accepts a
+  write and keeps the old bytes (a full disk, a read-only mount) MUST be reported as
+  `HardwareStillBound`, distinctly from any other write error. This is the one message here
+  that provokes a destructive follow-on action: a user unbinds in order to retire the
+  trusted component, and "unbound" over a still-bound blob is what makes that retirement
+  lose the key.
+
 ### 17.6 Conformance additions
 
 | # | Requirement | Spec |
@@ -915,6 +948,9 @@ satisfy; it does not describe shipped code. A caller that supplies none resolves
 | C-22 | A blob sealed by another device or another hardware class does not open; an envelope on a host with no hardware tier errors rather than returning bytes | §17.4 |
 | C-23 | The per-blob tier is determined from the stored bytes and may disagree with host capability; an unwrapped blob on a capable host reports software with reason "blob not wrapped" | §17.1 |
 | C-24 | A hardware refusal, a malformed envelope, and an unrecognised hardware class are reported as three distinct errors; `blob_tier` fails closed on the latter two | §17.4 |
+| C-25 | `unbind` returns a bound blob to a form a host with no hardware opens; a failed `unbind` leaves the stored bytes byte-identical | §17.5a |
+| C-26 | `bind` migrates an unwrapped blob up, is a no-op on an already-wrapped one, and restores the previous bytes when the new seal cannot be reopened from storage | §17.5a |
+| C-27 | An `unbind` the store did not take is reported as `HardwareStillBound`, never as success | §17.5a |
 
 Test evidence: `src/hardware/tests.rs` (tier resolution, fail-closed policy, cross-device
 binding, envelope codec) and `tests/hardware_v1_compat.rs` (committed golden v1 blobs

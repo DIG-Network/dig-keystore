@@ -256,6 +256,20 @@ pub enum KeystoreError {
         tier: String,
     },
 
+    /// An unbind reported by storage as taken, but the stored blob is still a
+    /// hardware envelope.
+    ///
+    /// Its own variant rather than a generic write error because of what the
+    /// caller does next: a user unbinds in order to safely retire the trusted
+    /// component, so "unbound" over a blob that is still bound is the one
+    /// message here that provokes a destructive action. The wording says STILL
+    /// BOUND for that reason.
+    #[error("unbind did not take: the blob at {key} is still hardware-bound")]
+    HardwareStillBound {
+        /// The backend key whose blob is still wrapped.
+        key: String,
+    },
+
     /// A hardware-wrapped blob was sealed by a different class of hardware.
     ///
     /// Distinct from [`HardwareUnwrapFailed`](Self::HardwareUnwrapFailed), which

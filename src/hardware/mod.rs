@@ -35,6 +35,17 @@
 //! into "there is none" would strip hardware protection from a machine that has
 //! it, on nothing more than a transient probe failure.
 //!
+//! **4. Binding is reversible, and must be.** The trusted component becomes a
+//! SECOND required factor: once a blob is wrapped, a cleared TPM or a lost
+//! device means the correct passphrase no longer opens it, permanently. So
+//! [`unbind`](HardwareBoundBackend::unbind) exists to return a blob to the
+//! portable §3 form while the hardware still answers, and
+//! [`bind`](HardwareBoundBackend::bind) migrates an older blob up. `bind`
+//! overwrites the only copy, so it proves the new seal reopens *from storage*
+//! before reporting success and restores the previous bytes if it cannot —
+//! and `unbind` verifies the same way, because a user who is told "unbound"
+//! may then go and clear the TPM.
+//!
 //! # Backwards compatibility (§5.1, HARD RULE)
 //!
 //! The v1 keystore format is unchanged, byte for byte. Detection is by prefix:
