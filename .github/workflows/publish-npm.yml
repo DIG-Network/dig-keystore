@@ -46,6 +46,20 @@ jobs:
         run: |
           npm install -g npm@latest
           npm --version
-      - name: publish to npmjs
+      - name: publish to npmjs (idempotent)
         working-directory: wasm
-        run: npm publish ./pkg --access public
+        # The wasm version is driven by wasm/Cargo.toml and only changes when the
+        # wasm crate itself changes. A crate release that leaves the wasm untouched
+        # would otherwise re-`npm publish` the same version and fail the whole run
+        # ("cannot publish over the previously published versions"). Skip the publish
+        # when that exact name@version is already on the registry; publish otherwise.
+        # Name + version are read from the GENERATED, patched pkg/package.json — the
+        # authoritative manifest wasm-pack + patch-pkg.mjs produced.
+        run: |
+          VER=$(node -p "require('./pkg/package.json').version")
+          PKG=$(node -p "require('./pkg/package.json').name")
+          if npm view "$PKG@$VER" version >/dev/null 2>&1; then
+            echo "$PKG@$VER already published — skipping."
+            exit 0
+          fi
+          npm publish ./pkg --access public
