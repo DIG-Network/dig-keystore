@@ -1009,3 +1009,86 @@ properties:
 Test evidence: `src/hardware/tests.rs` (tier resolution, fail-closed policy, cross-device
 binding, envelope codec) and `tests/hardware_v1_compat.rs` (committed golden v1 blobs
 decrypted in every tier).
+
+---
+
+## 18. Custody feature tier
+
+### 18.1 What the tier is (normative)
+
+The crate is divided into two tiers.
+
+The **core** tier seals arbitrary bytes under a password and stores them. It has no
+notion of *whose* key it is: `opaque` (§15), `Password` (§9), the backends (§10), the
+format/KDF/cipher types (§3–4), and hardware binding (§17). It is always compiled.
+
+The **custody** tier models a *user's* identity key: the typed container, the schemes
+that give it meaning, and the signer you get by unlocking one. It is compiled ONLY when
+the `custody` feature is enabled, which it is NOT by default.
+
+| Feature | Default | Gates |
+|---|---|---|
+| `custody` | off | `Keystore<K>` (§7), `SignerHandle<K>` (§8), `KeyScheme` and `scheme::{BlsSigning, L1WalletBls}` (§6), and the `scheme` module. Sources live under `src/custody/`; the whole module tree is `#[cfg]`-ed out. |
+| `hd-derivation` | off | `SignerHandle::expose_secret` (§8) — and nothing else. Implies `custody`, because the method is on a type that does not exist without it. |
+
+Normative requirements:
+
+- With `custody` off, NONE of the symbols in the table above SHALL be nameable through
+  the crate root. Naming one is a compile error (`E0432`, unresolved import).
+- With `custody` on and `hd-derivation` off, `SignerHandle::expose_secret` SHALL NOT
+  exist. Calling it is a compile error (`E0599`, no such method). Every other
+  `SignerHandle` operation — `sign`, `public_key` — remains available.
+- Neither feature SHALL change the bytes of any stored blob. The §3 typed-keystore
+  layout, the §15 `opaque` layout, and the §17.3 hardware envelope are identical in
+  every feature configuration; the features gate an API surface, never a format.
+- `opaque` SHALL remain ungated. A build with no custody surface at all MUST still
+  decode every blob any prior version wrote (§5.1), including recognising the `DIGVK1`
+  and `DIGLW1` magics well enough to reject them as not-`DIGOP1`.
+
+`hd-derivation` is split from `custody` because the overwhelming majority of custody
+consumers want to *sign*, not to extract. Only hierarchical-deterministic wallets and
+key-derivation libraries need the seed itself, so extraction is a second, separately
+named opt-in rather than a capability that arrives with the container.
+
+### 18.2 Why the tier exists
+
+The DIG node engine is identity-agnostic: it seals machine keys and never holds a
+user's identity key (dig_ecosystem #908). Splitting the crate along that line lets the
+engine depend on the sealing primitives while leaving the user-custody API out of its
+build entirely — the boundary is expressed in the dependency graph, where it can be
+checked, rather than only in prose.
+
+### 18.3 Limitation — a fail-closed default, NOT an invariant (normative)
+
+**Cargo unifies features across the resolved dependency graph.** If ANY crate anywhere
+in a consumer's closure enables `custody`, the custody surface is compiled into that
+consumer's build of `dig-keystore` and becomes nameable in the consumer's own code. This
+happens with no error, no warning, and no change to the consumer's own manifest.
+
+Therefore this specification claims exactly this and no more:
+
+- Off-by-default means a consumer that does not ask for custody, and whose dependencies
+  do not ask for it either, does not get it. That is a **fail-closed default**.
+- It is **NOT** a guarantee that a given binary cannot link the custody API. Nothing in
+  this crate can provide that guarantee, because the decision is made by feature
+  resolution in the consumer's graph, outside this crate.
+
+A consumer that needs the stronger property MUST enforce it on its own side — by
+asserting over its resolved graph (for example, failing its build if `cargo tree
+-e features` shows `dig-keystore/custody` enabled). For the DIG node that enforcement is
+tracked as dig_ecosystem #2177 and is out of scope for this crate.
+
+### 18.4 Conformance additions
+
+| # | Requirement | Spec |
+|---|---|---|
+| C-30 | With `custody` off, every symbol the feature gates fails to resolve through the crate root (`E0432`), and the core surface still builds | §18.1 |
+| C-31 | With `custody` on and `hd-derivation` off, `expose_secret` does not exist (`E0599`) while `sign` and `public_key` do | §18.1 |
+| C-32 | `opaque` is ungated: the frozen `DIGOP1` golden vectors decode in a build with no custody surface | §18.1, §5.1 |
+| C-33 | The gate claim is proven per-symbol under each feature configuration, each negative case paired with a positive control | §18.1 |
+
+Test evidence: `scripts/surface-check.sh` (C-30, C-31, C-33 — compiles a throwaway
+path-dependency probe crate once per symbol per configuration and asserts the exact
+rustc error code; run by the `test` CI job) and the `Golden opaque vectors (core-only
+build)` CI step running `tests/opaque_vectors.rs` under
+`--no-default-features --features file-backend,testing` (C-32).
