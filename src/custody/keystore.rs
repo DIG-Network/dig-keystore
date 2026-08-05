@@ -65,6 +65,7 @@ use zeroize::Zeroizing;
 
 use crate::backend::{BackendKey, KeychainBackend};
 use crate::cipher;
+use crate::custody::signer::SignerHandle;
 use crate::error::{KeystoreError, Result};
 use crate::format::{
     decode_file, encode_file, CipherId, KdfParams, KeystoreHeader, FORMAT_VERSION_V1,
@@ -72,7 +73,6 @@ use crate::format::{
 use crate::kdf;
 use crate::password::Password;
 use crate::scheme::KeyScheme;
-use crate::signer::SignerHandle;
 
 /// A typed, encrypted keystore.
 ///

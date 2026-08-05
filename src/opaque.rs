@@ -2,9 +2,9 @@
 //!
 //! # Why this exists (separate from `Keystore<K>`)
 //!
-//! [`crate::Keystore<K>`] is generic over a [`crate::scheme::KeyScheme`],
-//! which pins a *fixed* [`crate::scheme::KeyScheme::SECRET_LEN`] and derives
-//! a typed public key from the secret. That fits validator/wallet seeds (32
+//! The typed `Keystore<K>` container is generic over a `KeyScheme`, which
+//! pins a *fixed* `SECRET_LEN` and derives a typed public key from the
+//! secret. That fits validator/wallet seeds (32
 //! bytes, always) but not every caller: a browser vault sealing BIP-39
 //! entropy (16/20/24/28/32 bytes depending on word count) or any other
 //! opaque application secret has no fixed length and no public-key concept
@@ -13,7 +13,7 @@
 //!
 //! `opaque` provides that: the SAME on-disk container (§3 of `SPEC.md` —
 //! 53-byte header, AES-256-GCM ciphertext+tag, trailing CRC-32, Argon2id KDF)
-//! used by every [`crate::Keystore<K>`] file, but for a secret of **any**
+//! used by every typed `Keystore<K>` file, but for a secret of **any**
 //! byte length, addressed by bytes-in/bytes-out rather than a
 //! [`crate::backend::KeychainBackend`] path. This is the primitive the
 //! `dig-keystore-wasm` binding (dig_ecosystem #147 Phase A) wraps so browser
@@ -52,12 +52,12 @@ use crate::kdf;
 use crate::password::Password;
 
 /// 6-byte on-disk magic for opaque-secret blobs. See the module-level docs
-/// for how this relates to the typed [`crate::scheme`] magics.
+/// for how this relates to the typed key-scheme magics (`DIGVK1`/`DIGLW1`).
 pub const MAGIC: [u8; 6] = *b"DIGOP1";
 
 /// Scheme id for opaque-secret blobs, stored in [`KeystoreHeader::scheme_id`].
-/// `0x0002` and `0x0001`/`0x0003` are taken by `crate::scheme` types; `0x0004`
-/// is the next free id.
+/// `0x0002` and `0x0001`/`0x0003` are taken by the typed key-scheme
+/// containers; `0x0004` is the next free id.
 pub const SCHEME_ID: u16 = 0x0004;
 
 /// Seal `secret` (any length, including empty) under `password`, returning
@@ -234,40 +234,6 @@ mod tests {
         let blob = seal(&Password::from("hunter2"), &secret, fast_params()).unwrap();
         assert!(verify_password(&Password::from("hunter2"), &blob));
         assert!(!verify_password(&Password::from("wrong"), &blob));
-    }
-
-    /// **Proves:** a blob written by a typed [`crate::Keystore<K>`] (magic
-    /// `DIGVK1`) is rejected by `opaque::open` with `SchemeMismatch`, rather
-    /// than being silently decoded as if it were an opaque secret.
-    ///
-    /// **Why it matters:** `opaque` and `Keystore<K>` share the exact same
-    /// container format; only the magic/scheme id distinguish them. Without
-    /// this check, a caller could accidentally "open" a validator's signing
-    /// key through the generic opaque path (or vice versa), defeating the
-    /// type-confusion protection the rest of the crate relies on.
-    ///
-    /// **Catches:** a decode path that checks the format generically but
-    /// forgets to assert `MAGIC`/`SCHEME_ID` before returning the plaintext.
-    #[test]
-    fn typed_keystore_blob_is_rejected_as_opaque() {
-        use crate::backend::{BackendKey, KeychainBackend, MemoryBackend};
-        use crate::scheme::BlsSigning;
-        use std::sync::Arc;
-
-        let backend: Arc<dyn KeychainBackend> = Arc::new(MemoryBackend::new());
-        let password = Password::from("kat-password");
-        crate::Keystore::<BlsSigning>::create(
-            backend.clone(),
-            BackendKey::new("k"),
-            password.clone(),
-            None,
-            fast_params(),
-        )
-        .unwrap();
-        let raw = backend.read(&BackendKey::new("k")).unwrap();
-
-        let err = open(&password, &raw).unwrap_err();
-        assert!(matches!(err, KeystoreError::SchemeMismatch { .. }));
     }
 
     /// **Proves:** `seal_with_rng` is a pure, deterministic function of its

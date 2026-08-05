@@ -60,15 +60,13 @@
 
 pub mod backend;
 mod cipher;
+mod custody;
 mod error;
 mod format;
 pub mod hardware;
 mod kdf;
-mod keystore;
 pub mod opaque;
 mod password;
-pub mod scheme;
-mod signer;
 
 // Re-exports — the public surface.
 
@@ -85,10 +83,15 @@ pub use hardware::{
     DegradeReason, HardwareBoundBackend, HardwareKind, HardwarePolicy, HardwareProbe,
     HardwareProvider, KeyCustody, ProtectionTier,
 };
-pub use keystore::Keystore;
 pub use password::Password;
-pub use scheme::{BlsSigning, KeyScheme, L1WalletBls};
-pub use signer::SignerHandle;
+
+// The user-custody surface. Lives under `src/custody/` so the module boundary
+// between machine-key sealing (core) and user-key custody is explicit; the
+// re-exports keep the public paths exactly where they were.
+pub use custody::keystore::Keystore;
+pub use custody::scheme;
+pub use custody::scheme::{BlsSigning, KeyScheme, L1WalletBls};
+pub use custody::signer::SignerHandle;
 
 // chia-bls re-exports so consumers don't need a direct dependency for simple cases.
 pub mod bls {

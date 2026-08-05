@@ -286,7 +286,7 @@ impl KeystoreHeader {
 
 /// Known magic prefixes. Extended by schemes; see `scheme/*`.
 ///
-/// `DIGOP1` is not a [`crate::scheme::KeyScheme`] magic — it identifies the
+/// `DIGOP1` is not a typed key-scheme magic — it identifies the
 /// [`crate::opaque`] container (arbitrary-length password-sealed secrets, no
 /// typed public-key derivation). Registering it here is purely additive: it
 /// teaches the decoder a new accepted magic without touching how `DIGVK1`/
