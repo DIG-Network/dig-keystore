@@ -1624,3 +1624,46 @@ fn unbind_refuses_to_report_success_when_the_store_kept_the_envelope() {
          trusted component on the strength of it: {err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Composition with the OS credential store (feature `os-keychain`).
+// ---------------------------------------------------------------------------
+
+/// **Proves:** a `HardwareBoundBackend` layered over a real
+/// [`OsKeychainBackend`] round-trips a `DIGOP1` payload — the hardware
+/// envelope it stores is a payload the OS-store write guard accepts.
+///
+/// **Why it matters:** `HardwareBoundBackend::write` seals into a `DIGHW1`
+/// envelope and hands those bytes to its inner backend, and an
+/// `OsKeychainBackend` is a legitimate inner. §10.5's write guard therefore
+/// sees `DIGHW1`, never the caller's own magic. An allowlist covering only the
+/// magics in `format.rs` would reject every hardware-bound write and break a
+/// shipped composition — a failure no single-backend test can see, because the
+/// two halves are each correct in isolation.
+///
+/// **Catches:** `DIGHW1` missing from the §10.5 allowlist; a guard that
+/// inspects the caller's payload rather than the bytes actually stored.
+#[cfg(feature = "os-keychain")]
+#[test]
+fn hardware_envelope_round_trips_through_the_os_keychain_backend() {
+    use crate::backend::os_keychain::test_support::fake_backend;
+
+    let be = HardwareBoundBackend::new(
+        fake_backend(),
+        Some(Arc::new(FakeDevice::working(
+            HardwareKind::WindowsTpm20,
+            0x5A,
+        ))),
+        HardwarePolicy::Required,
+    )
+    .unwrap();
+
+    let key = BackendKey::new("identity");
+    // A `DIGOP1` payload — the opaque container a caller seals in practice.
+    let mut payload = b"DIGOP1".to_vec();
+    payload.extend_from_slice(&[0x77; 64]);
+
+    be.write(&key, &payload)
+        .expect("a hardware-bound write must be storable in the OS credential store");
+    assert_eq!(be.read(&key).unwrap(), payload);
+}

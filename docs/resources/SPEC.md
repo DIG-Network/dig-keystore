@@ -290,17 +290,17 @@ impl KeychainBackend for FileBackend {
 
 A `KeychainBackend` that persists each blob in the host OS credential store — **Windows Credential Manager** or **macOS Keychain** — via the cross-platform `keyring` crate. Each `BackendKey` maps to a `(service, account)` pair: the service is fixed per backend instance (chosen by the caller), the account is the `BackendKey` string. The stored value is the raw keystore ciphertext, written through `keyring`'s binary secret API (no textual re-encoding).
 
-**Why an OS credential store.** On Windows and macOS the credential store gates access with a **per-application ACL** scoped to the logged-in user and released by the login session. That ACL — not the crate — is the access-control primitive. The keystore's own DIGVK1/DIGOP1 sealing remains layered underneath as defence-in-depth against a raw at-rest artifact; it is not weakened or replaced by this backend.
+**A storage location, not an access-control primitive.** The crate's Argon2id + AES-256-GCM sealing is the primary access control for anything stored here; the OS credential store is defence-in-depth only. The access boundary differs by platform: macOS Keychain applies a per-application ACL, while a Windows generic Credential Manager entry is DPAPI-protected under the logged-in user's key and readable by **any process running as that user** (a per-USER boundary). `write` therefore rejects any payload lacking a recognised DIG container magic. The credential store is released by the login session, so a machine/system service MUST NOT use this backend. The normative statement is the root `SPEC.md` §10.5.
 
-**Platform gating (HARD).** The `keyring` dependency is compiled **only** on `target_os = "windows"` or `target_os = "macos"`. On every other target — Linux and `wasm32` included — `keyring` is never pulled (no dbus/libsecret system-library tax, no wasm break) and `OsKeychainBackend::open` returns `None` so callers fall back to `FileBackend`. Linux is deliberately excluded as a custody primary: the kernel keyutils session keyring is readable by any same-UID process and is non-persistent across logout, so the passphrase-sealed file is the correct primary there.
+**Platform gating (HARD).** The `keyring` dependency is compiled **only** on `target_os = "windows"` or `target_os = "macos"`. On every other target — Linux and `wasm32` included — `keyring` is never pulled (no dbus/libsecret system-library tax, no wasm break) and `OsKeychainBackend::open` returns `None`. The crate performs no fallback of any kind — selecting another backend is the caller's decision. Linux is deliberately excluded as a custody primary: the kernel keyutils session keyring is readable by any same-UID process and is non-persistent across logout, so the passphrase-sealed file is the correct primary there.
 
-**Fail-to-fallback construction.**
+**Construction.**
 
 ```rust
 impl OsKeychainBackend {
     /// Open the OS credential store for `service`, probing the backend once.
-    /// Returns `None` when no usable OS store exists on this host (⇒ the caller
-    /// uses `FileBackend`). On Linux / wasm this is always `None`.
+    /// Returns `None` when no usable OS store exists on this host; the crate
+    /// performs no fallback. On Linux / wasm this is always `None`.
     pub fn open(service: impl Into<String>) -> Option<Self>;
 }
 ```
@@ -378,7 +378,7 @@ pub enum KeystoreError {
 | Flag | Default | Effect |
 |---|---|---|
 | `file-backend` | on | Ships `FileBackend` |
-| `os-keychain` | off | Ships `OsKeychainBackend` (Windows Credential Manager / macOS Keychain via `keyring`; `None` ⇒ file fallback elsewhere). `keyring` is target-gated to Windows/macOS. |
+| `os-keychain` | off | Ships `OsKeychainBackend` (Windows Credential Manager / macOS Keychain via `keyring`; `open` returns `None` elsewhere and the crate performs no fallback). `keyring` is target-gated to Windows/macOS. |
 | `password-strength` | off | Enables `Password::strength` via `zxcvbn` |
 | `eip2335` | off | Import/export in Ethereum keystore v4 JSON format (for operators migrating from `ethdo`, `eth2-val-tools`, etc.) |
 | `chia-keychain` | off | Import Chia `.keychain` files (seed-based) |

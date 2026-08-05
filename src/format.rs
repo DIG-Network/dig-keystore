@@ -291,7 +291,7 @@ impl KeystoreHeader {
 /// typed public-key derivation). Registering it here is purely additive: it
 /// teaches the decoder a new accepted magic without touching how `DIGVK1`/
 /// `DIGLW1` are recognized or decoded (§5.1 backwards-compat spirit).
-fn is_known_magic(m: &[u8; 6]) -> bool {
+pub(crate) fn is_known_magic(m: &[u8; 6]) -> bool {
     // Matches MAGIC constants in the scheme impls. Kept inline here for
     // decode-time validation without needing generic parameters.
     matches!(m, b"DIGVK1" | b"DIGLW1" | b"DIGOP1")
