@@ -6,13 +6,19 @@
 //! secret length and public-key derivation, and the
 //! [`SignerHandle<K>`](signer::SignerHandle) returned by unlocking one.
 //!
-//! # Why this is a separate module
+//! # Why this is a separate, non-default module
 //!
 //! The crate's *core* — [`crate::opaque`] sealing, [`crate::backend`],
 //! [`crate::format`], [`crate::cipher`], [`crate::kdf`] — is machine-key
 //! plumbing: seal these bytes under this password, store them, read them back.
 //! It has no notion of whose key it is. The custody API is the opposite: it
 //! models a user's identity key and hands out a signer for it.
+//!
+//! Consumers that only need machine-key sealing (notably the DIG node engine,
+//! which is deliberately identity-agnostic) build without the `custody`
+//! feature, so the custody types are not nameable in their dependency closure.
+//! See `SPEC.md` §18 for the feature tiers and for the honest limits of that
+//! guarantee under Cargo feature unification.
 //!
 //! The module boundary is a hard one: nothing under `custody/` is referenced by
 //! the core modules. That is what keeps a future extraction into its own crate

@@ -11,12 +11,12 @@ use chia_bls::{PublicKey, SecretKey, Signature};
 use rand_core::{CryptoRng, RngCore};
 use zeroize::Zeroizing;
 
+use crate::custody::scheme::KeyScheme;
 use crate::error::{KeystoreError, Result};
-use crate::scheme::KeyScheme;
 
 /// DIG validator BLS signing key (G1 pubkey / G2 signature on BLS12-381).
 ///
-/// See [`crate::scheme`] for how this plugs into [`crate::Keystore`].
+/// See [`crate::custody::scheme`] for how this plugs into [`crate::Keystore`].
 #[derive(Debug, Clone, Copy)]
 pub struct BlsSigning;
 

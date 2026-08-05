@@ -3,7 +3,7 @@
 //! # Responsibilities
 //!
 //! [`Keystore<K>`] is the orchestration layer that composes [`crate::format`],
-//! [`crate::kdf`], [`crate::cipher`], [`crate::scheme`], and [`crate::backend`]
+//! [`crate::kdf`], [`crate::cipher`], [`crate::custody::scheme`], and [`crate::backend`]
 //! into a user-friendly API. It is a thin type; the cryptographic weight
 //! lives in the modules it calls:
 //!
@@ -65,6 +65,7 @@ use zeroize::Zeroizing;
 
 use crate::backend::{BackendKey, KeychainBackend};
 use crate::cipher;
+use crate::custody::scheme::KeyScheme;
 use crate::custody::signer::SignerHandle;
 use crate::error::{KeystoreError, Result};
 use crate::format::{
@@ -72,7 +73,6 @@ use crate::format::{
 };
 use crate::kdf;
 use crate::password::Password;
-use crate::scheme::KeyScheme;
 
 /// A typed, encrypted keystore.
 ///
@@ -82,7 +82,7 @@ use crate::scheme::KeyScheme;
 ///
 /// # Type parameter
 ///
-/// `K` is the key scheme (see [`crate::scheme`]): typically [`BlsSigning`](crate::BlsSigning)
+/// `K` is the key scheme (see [`crate::custody::scheme`]): typically [`BlsSigning`](crate::BlsSigning)
 /// for validator keys, [`L1WalletBls`](crate::L1WalletBls) for Chia L1 wallet keys.
 pub struct Keystore<K: KeyScheme> {
     backend: Arc<dyn KeychainBackend>,

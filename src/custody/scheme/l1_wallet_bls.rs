@@ -29,8 +29,8 @@ use chia_bls::{PublicKey, SecretKey, Signature};
 use rand_core::{CryptoRng, RngCore};
 use zeroize::Zeroizing;
 
+use crate::custody::scheme::KeyScheme;
 use crate::error::{KeystoreError, Result};
-use crate::scheme::KeyScheme;
 
 /// DIG/Chia L1 wallet master BLS key (the root of wallet HD derivation).
 ///
@@ -102,7 +102,7 @@ mod tests {
     use super::*;
 
     /// **Proves:** `L1WalletBls::MAGIC` and `L1WalletBls::SCHEME_ID` differ
-    /// from those of [`crate::scheme::BlsSigning`].
+    /// from those of [`crate::custody::scheme::BlsSigning`].
     ///
     /// **Why it matters:** Type confusion between a validator signing key
     /// and a wallet master seed is the single most dangerous regression this
@@ -115,7 +115,7 @@ mod tests {
     /// `BlsSigning` without editing them for the new scheme.
     #[test]
     fn magic_differs_from_bls_signing() {
-        use crate::scheme::BlsSigning;
+        use crate::custody::scheme::BlsSigning;
         assert_ne!(L1WalletBls::MAGIC, BlsSigning::MAGIC);
         assert_ne!(L1WalletBls::SCHEME_ID, BlsSigning::SCHEME_ID);
     }
@@ -144,7 +144,7 @@ mod tests {
     /// **Proves:** both `public_key` and `sign` reject a secret whose length is
     /// not [`L1WalletBls::SECRET_LEN`], returning
     /// [`KeystoreError::InvalidPlaintext`] with the expected/got lengths — and
-    /// do so **without panicking** (the [`crate::scheme::KeyScheme`] contract
+    /// do so **without panicking** (the [`crate::custody::scheme::KeyScheme`] contract
     /// forbids panicking on malformed input).
     ///
     /// **Why it matters:** A wrong-length seed reaching `SecretKey::from_seed`
