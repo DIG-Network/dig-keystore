@@ -455,16 +455,24 @@ access-control primitive**.
 - The crate's Argon2id + AES-256-GCM sealing (§3–§5) MUST remain the primary access control
   for anything stored here; the OS credential store is defence-in-depth **only**.
 - Callers MUST NOT write an unlock password, passphrase, mnemonic, raw seed, or any other
-  plaintext secret to this backend. `write` MUST reject any payload not beginning with a
-  recognised DIG container magic (`DIGVK1`, `DIGLW1`, `DIGOP1` per §3/§15, or the `DIGHW1`
-  hardware envelope per §17), returning `KeystoreError::Backend` of kind `InvalidInput`.
-  This guard binds callers of this crate; it does not and cannot prevent other software
-  from writing to the same OS store.
+  plaintext secret to this backend; only blobs this crate has already sealed belong here.
+  This is a **caller obligation**. The backend is a byte-blob KV store and does not
+  inspect or constrain the payload — it cannot, because `HardwareBoundBackend` (§17.5a)
+  legitimately writes unwrapped, non-container bytes through its inner backend on `unbind`
+  and on a failed `bind`'s restore.
 - **Platform access boundary (normative, differs by platform).** On **macOS** the Keychain
-  applies a per-application ACL. On **Windows**, generic Credential Manager entries are
+  applies a per-application ACL, but one gated by **user consent**: a different process
+  running as the same user triggers an authorization prompt the user may answer "Always
+  Allow", and the trusted-application designation rests on a code signature a same-user
+  process can generally overwrite. On **Windows**, generic Credential Manager entries are
   protected by DPAPI under the logged-in user's key and are readable by **any process
-  running as that user** — a **per-user** boundary, not per-application. Implementations
-  and consumers MUST NOT assume a per-application boundary on Windows.
+  running as that user** — a **per-user** boundary, not per-application. Nor is it
+  machine-local: entries are written with `CRED_PERSIST_ENTERPRISE`, so on a domain-joined
+  host the credential **roams with the user profile**, and the boundary is any process
+  running as that user on any machine they roam to. Implementations and consumers MUST NOT
+  assume a per-application boundary on Windows, MUST NOT assume the entry stays on the
+  machine that wrote it, and MUST NOT treat the macOS ACL as a hard boundary against a
+  same-user attacker.
 - **Not for a machine/system service.** The OS credential store is released by the **login
   session**. A machine or system service — a node daemon running as SYSTEM or under a
   non-interactive account — has no login session to release it, so such a service MUST NOT
@@ -479,11 +487,12 @@ access-control primitive**.
   MUST return `None`. Linux's kernel keyutils session keyring is readable by any same-UID
   process and is non-persistent across logout, so it MUST NOT be a custody primary; the
   passphrase-sealed `FileBackend` is the Linux primary.
-- **Read is unconditional.** The write guard narrows writes only. `read` MUST return any
-  previously stored blob byte-identically, whatever its prefix (§5.1).
+- **Read is unconditional.** `read` MUST return any previously stored blob
+  byte-identically, whatever its prefix (§5.1).
 - **Enumeration.** No native enumeration exists; a best-effort reserved index entry powers
   `list` only. It is never authoritative for `read`/`write`/`delete`/`exists`, and is
-  written on a private path the guard and the public `write` API cannot reach.
+  written on a private path below the public `write` API — whose reserved-name check
+  refuses the index account outright.
 
 ---
 
@@ -992,7 +1001,6 @@ properties:
 | C-25 | `unbind` returns a bound blob to a form a host with no hardware opens; a failed `unbind` leaves the stored bytes byte-identical | §17.5a |
 | C-26 | `bind` migrates an unwrapped blob up, is a no-op on an already-wrapped one, and restores the previous bytes when the new seal cannot be reopened from storage | §17.5a |
 | C-27 | An `unbind` the store did not take is reported as `HardwareStillBound`, never as success | §17.5a |
-| C-28 | `OsKeychainBackend::write` rejects any payload lacking a recognised DIG container magic; `read` is unrestricted | §10.5 |
 | C-29 | `OsKeychainBackend::open` returns `None` on Linux/wasm and the crate performs no fallback | §10.5 |
 
 Test evidence: `src/hardware/tests.rs` (tier resolution, fail-closed policy, cross-device

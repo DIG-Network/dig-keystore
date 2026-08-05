@@ -1630,19 +1630,17 @@ fn unbind_refuses_to_report_success_when_the_store_kept_the_envelope() {
 // ---------------------------------------------------------------------------
 
 /// **Proves:** a `HardwareBoundBackend` layered over a real
-/// [`OsKeychainBackend`] round-trips a `DIGOP1` payload — the hardware
-/// envelope it stores is a payload the OS-store write guard accepts.
+/// [`OsKeychainBackend`] round-trips a `DIGOP1` payload end to end — write
+/// seals into a `DIGHW1` envelope, the OS store persists exactly those bytes,
+/// and read returns the caller's original payload.
 ///
-/// **Why it matters:** `HardwareBoundBackend::write` seals into a `DIGHW1`
-/// envelope and hands those bytes to its inner backend, and an
-/// `OsKeychainBackend` is a legitimate inner. §10.5's write guard therefore
-/// sees `DIGHW1`, never the caller's own magic. An allowlist covering only the
-/// magics in `format.rs` would reject every hardware-bound write and break a
-/// shipped composition — a failure no single-backend test can see, because the
-/// two halves are each correct in isolation.
+/// **Why it matters:** `OsKeychainBackend` is a legitimate inner for the
+/// hardware backend, so the envelope bytes and the enumeration-index bytes both
+/// travel through it on every write. A composition failure is invisible to
+/// either half's own tests, because each half is correct in isolation.
 ///
-/// **Catches:** `DIGHW1` missing from the §10.5 allowlist; a guard that
-/// inspects the caller's payload rather than the bytes actually stored.
+/// **Catches:** an inner backend that re-encodes, truncates, or refuses the
+/// bytes `HardwareBoundBackend` actually hands it.
 #[cfg(feature = "os-keychain")]
 #[test]
 fn hardware_envelope_round_trips_through_the_os_keychain_backend() {
@@ -1666,4 +1664,112 @@ fn hardware_envelope_round_trips_through_the_os_keychain_backend() {
     be.write(&key, &payload)
         .expect("a hardware-bound write must be storable in the OS credential store");
     assert_eq!(be.read(&key).unwrap(), payload);
+}
+
+/// **Proves:** `unbind` is a true inverse of `write` over the OS credential
+/// store — the unwrapped ORIGINAL bytes reach the inner backend and read back
+/// byte-identically, even when those bytes carry no DIG container magic.
+///
+/// **Why it matters:** conformance C-25. `unbind` deliberately writes through
+/// `inner`, not `self.write`, so the bytes the inner backend sees are the
+/// caller's plain payload, not an envelope. An inner backend that constrains
+/// what a payload may look like makes `unbind` impossible forever: two calls
+/// over this crate's own public API — `write` (wrapped, accepted) then
+/// `unbind` (unwrapped, refused) — strand the blob in a `DIGHW1` envelope with
+/// no way back down to software.
+///
+/// **Fixture:** the payload is deliberately NOT a DIG container. A
+/// container-shaped payload cannot see this failure, because it satisfies any
+/// container constraint the inner backend might impose — the very property
+/// under test. Two hops (write then unbind) are required: a single `write`
+/// stores an envelope and looks healthy either way.
+///
+/// **Catches:** any inner-backend precondition on payload shape, which is
+/// architecturally incompatible with `unbind`.
+#[cfg(feature = "os-keychain")]
+#[test]
+fn unbind_returns_a_non_container_payload_through_the_os_keychain_backend() {
+    use crate::backend::os_keychain::test_support::fake_backend;
+
+    let inner: Arc<dyn KeychainBackend> = Arc::new(fake_backend());
+    let be = HardwareBoundBackend::with_inner(
+        inner.clone(),
+        Some(Arc::new(FakeDevice::working(
+            HardwareKind::WindowsTpm20,
+            0x5A,
+        ))),
+        HardwarePolicy::Required,
+    )
+    .unwrap();
+
+    let key = BackendKey::new("identity");
+    let payload = b"an-opaque-secret-with-no-dig-magic".to_vec();
+
+    be.write(&key, &payload).unwrap();
+    assert!(
+        envelope::is_envelope(&inner.read(&key).unwrap()),
+        "the hardware tier stores an envelope"
+    );
+
+    let tier = be
+        .unbind(&key)
+        .expect("unbind must be able to put the unwrapped original back");
+    assert_eq!(
+        tier,
+        ProtectionTier::Software(DegradeReason::BlobNotWrapped)
+    );
+    assert_eq!(
+        inner.read(&key).unwrap(),
+        payload,
+        "the original bytes are back in the store, byte-identical"
+    );
+}
+
+/// **Proves:** a failed `bind` over an OS-credential-store inner restores the
+/// PRE-BIND bytes even when those bytes are a legacy, non-container blob.
+///
+/// **Why it matters:** conformance C-26, on exactly the population `bind`
+/// exists to serve — a blob written before hardware binding existed. The
+/// restore in `bind` is best-effort (`let _ = self.inner.write(..)`), so an
+/// inner backend that refuses those bytes fails SILENTLY and leaves the store
+/// holding a `DIGHW1` envelope the hardware has just proven it cannot reopen:
+/// unrecoverable custody loss reported only as a wrap error.
+///
+/// **Fixture:** the seeded blob carries no DIG magic and is planted through the
+/// raw store, because that is what a pre-migration entry looks like. A
+/// container-shaped blob would be restored successfully under a payload-shape
+/// constraint too, and so could not distinguish the failure.
+///
+/// **Catches:** any inner-backend precondition that the swallowed restore
+/// cannot satisfy.
+#[cfg(feature = "os-keychain")]
+#[test]
+fn a_failed_bind_restores_a_legacy_blob_through_the_os_keychain_backend() {
+    use crate::backend::os_keychain::test_support::fake_backend_seeded;
+
+    let legacy = b"written-by-v0.6.1".to_vec();
+    let inner: Arc<dyn KeychainBackend> = Arc::new(fake_backend_seeded(&[("identity", &legacy)]));
+    let key = BackendKey::new("identity");
+
+    let be = HardwareBoundBackend::with_inner(
+        inner.clone(),
+        Some(Arc::new(
+            FakeDevice::working(HardwareKind::WindowsTpm20, 3).failing_unwrap_after(1),
+        )),
+        HardwarePolicy::Required,
+    )
+    .expect("the device is honest at construction");
+
+    let err = be
+        .bind(&key)
+        .expect_err("a seal that cannot be reopened must not be committed");
+    assert!(
+        matches!(err, KeystoreError::HardwareUnwrapFailed { .. }),
+        "it reports the hardware failing to reopen its own seal: {err}"
+    );
+    assert_eq!(
+        inner.read(&key).unwrap(),
+        legacy,
+        "the legacy, openable bytes are restored — never left as an unopenable envelope"
+    );
 }

@@ -74,7 +74,8 @@ zxcvbn = { version = "3", optional = true }
 # OS-native credential store (`os-keychain` feature). Target-gated to Windows /
 # macOS — the only platforms with a native credential store this crate supports
 # (see `src/backend/os_keychain.rs` module docs for the boundary each one
-# actually provides: per-application on macOS, per-USER on Windows).
+# actually provides: a consent-gated per-application ACL on macOS, and only a
+# per-USER DPAPI boundary on Windows).
 # `default-features = false`
 # selects only the native backends, so no dbus/libsecret system libraries are
 # pulled and CI stays free of system deps. Never compiled on Linux or wasm.

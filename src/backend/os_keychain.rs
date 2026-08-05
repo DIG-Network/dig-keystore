@@ -26,19 +26,25 @@
 //!
 //! The access boundary is **not the same on both platforms**:
 //!
-//! - **macOS** — the Keychain applies a genuine per-application ACL.
+//! - **macOS** — the Keychain applies a per-application ACL, but one gated by
+//!   **user consent**: a different process running as the same user triggers an
+//!   authorization prompt the user may answer "Always Allow", and the
+//!   trusted-application designation rests on a code signature a same-user
+//!   process can generally overwrite. Real, but not a hard boundary against a
+//!   same-user attacker.
 //! - **Windows** — a generic Credential Manager entry is protected by DPAPI
 //!   under the logged-in user's key and is readable by **any process running
 //!   as that user**. That is a **per-user** boundary. Never assume a
-//!   per-application one here.
+//!   per-application one here. It is not even machine-local: `keyring` writes
+//!   with `CRED_PERSIST_ENTERPRISE`, so on a domain-joined host the credential
+//!   **roams with the user profile** — the boundary is any process running as
+//!   that user on any machine they roam to.
 //!
-//! Because of that, [`write`](KeychainBackend::write) rejects any payload that
-//! does not begin with a recognised DIG container magic (`DIGVK1`, `DIGLW1`,
-//! `DIGOP1`, or the `DIGHW1` hardware envelope).
-//! The guard binds callers of this crate; it cannot stop other software
-//! writing plaintext to the same OS store.
-//! [`read`](KeychainBackend::read) is unrestricted: any blob a previous
-//! version persisted must still open (`SPEC.md` §5.1).
+//! Because of that, callers **MUST NOT** write an unlock password, passphrase,
+//! mnemonic, raw seed, or any other plaintext secret to this backend — only
+//! blobs this crate has already sealed. That is a caller obligation
+//! (`SPEC.md` §10.5), not something the backend enforces: it is a byte-blob KV
+//! store and stores whatever it is given.
 //!
 //! # Platform gating (HARD)
 //!
@@ -75,9 +81,6 @@ use zeroize::Zeroizing;
 /// identifiers like `validator_bls`).
 const INDEX_ACCOUNT: &str = "__dig_keystore_index__";
 
-/// Length of every DIG container magic (`SPEC.md` §3: a 6-byte prefix).
-const MAGIC_LEN: usize = 6;
-
 /// Low-level `(account) -> secret` store abstraction over one credential-store
 /// namespace (service). Extracted so the enumeration/round-trip logic is
 /// testable without touching a real OS store: the real implementation is
@@ -101,10 +104,10 @@ trait RawStore: Send + Sync + 'static {
 /// usable OS store exists on this host. The crate performs no fallback; the
 /// caller selects an alternative backend, as the example below does.
 ///
-/// A storage location, not an access-control primitive: the seal is the
-/// primary access control and `write` accepts sealed DIG containers only.
-/// See the module docs for the per-platform access boundary and for why a
-/// machine/system service must not use this backend.
+/// A storage location, not an access-control primitive: the crate's own seal
+/// is the primary access control, so callers MUST NOT file plaintext secrets
+/// here. See the module docs for the per-platform access boundary and for why
+/// a machine/system service must not use this backend.
 ///
 /// # Example
 ///
@@ -231,50 +234,6 @@ fn validate_key_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Whether `bytes` begin with a DIG container magic this crate recognises —
-/// a sealed §3 keystore/opaque blob, or a §17 hardware envelope wrapping one.
-///
-/// The answer is DELEGATED to the two predicates that already own the
-/// question ([`crate::format::is_known_magic`] and
-/// [`crate::hardware::envelope::is_envelope`]) rather than re-listing the
-/// magic literals here. That delegation is the point: a new container magic
-/// registered in `format.rs` becomes writable to the OS credential store on
-/// the same commit, instead of silently failing until someone remembers this
-/// second list exists.
-///
-/// A payload too short to carry a magic is not a container.
-fn is_dig_container(bytes: &[u8]) -> bool {
-    let Some(prefix) = bytes.get(..MAGIC_LEN) else {
-        return false;
-    };
-    match <[u8; MAGIC_LEN]>::try_from(prefix) {
-        Ok(magic) => {
-            crate::format::is_known_magic(&magic) || crate::hardware::envelope::is_envelope(bytes)
-        }
-        Err(_) => false,
-    }
-}
-
-/// Reject a payload that is not a sealed DIG container (`SPEC.md` §10.5).
-///
-/// The OS credential store is a storage location, not an access-control
-/// primitive: on Windows a generic Credential Manager entry is DPAPI-protected
-/// under the logged-in user's key and readable by ANY process running as that
-/// user. Refusing plaintext keeps the crate's Argon2id + AES-256-GCM seal the
-/// primary access control for everything filed here. The guard binds callers
-/// of this crate only — it cannot stop other software writing to the same OS
-/// store.
-fn validate_sealed_payload(data: &[u8]) -> Result<()> {
-    if !is_dig_container(data) {
-        return Err(KeystoreError::from(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "refusing to store an unsealed payload in the OS credential store: \
-             expected a DIG container (see SPEC.md §10.5)",
-        )));
-    }
-    Ok(())
-}
-
 /// Redacted `Debug` — never prints service, account, or secret material.
 impl std::fmt::Debug for OsKeychainBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -297,7 +256,6 @@ impl KeychainBackend for OsKeychainBackend {
 
     fn write(&self, key: &BackendKey, data: &[u8]) -> Result<()> {
         validate_key_name(key.as_str())?;
-        validate_sealed_payload(data)?;
         self.store.set(key.as_str(), data)?;
         // Authoritative entry is written; index is a best-effort convenience.
         self.index_insert(key.as_str());
@@ -383,7 +341,8 @@ impl RawStore for KeyringStore {
 }
 
 // ---------------------------------------------------------------------------
-// `open` — platform-specific construction with fail-to-fallback semantics.
+// `open` — platform-specific construction. `None` means "no usable store
+// here"; the crate performs no fallback, the caller chooses what to do.
 // ---------------------------------------------------------------------------
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -463,8 +422,8 @@ pub(crate) mod test_support {
     }
 
     /// An [`OsKeychainBackend`] over a [`FakeStore`] pre-seeded with `entries`,
-    /// bypassing `write` entirely — the only way to model bytes an EARLIER
-    /// crate version (before the §10.5 write guard) already persisted.
+    /// bypassing `write` entirely — the way to model bytes an EARLIER crate
+    /// version already persisted into a user's credential store.
     pub(crate) fn fake_backend_seeded(entries: &[(&str, &[u8])]) -> OsKeychainBackend {
         let store = FakeStore::default();
         for (account, secret) in entries {
@@ -477,8 +436,8 @@ pub(crate) mod test_support {
     }
 
     /// A payload carrying the `DIGOP1` container magic — the shape a caller is
-    /// permitted to store (`SPEC.md` §10.5). Only the prefix is load-bearing
-    /// for the write guard; the tail stands in for sealed ciphertext.
+    /// obliged to store here (`SPEC.md` §10.5: sealed containers only). The
+    /// tail stands in for sealed ciphertext.
     pub(crate) fn sealed(seed: u8) -> Vec<u8> {
         let mut blob = b"DIGOP1".to_vec();
         blob.extend_from_slice(&[seed; 16]);
@@ -758,131 +717,20 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // §10.5 write guard — the OS credential store takes sealed containers only.
+    // Back-compat and layering.
     // -----------------------------------------------------------------------
 
-    /// Assert `err` is the `Backend(InvalidInput)` shape §10.5 mandates —
-    /// the same shape `validate_key_name` already returns, so no new error
-    /// variant enters the §11 catalog.
-    fn assert_invalid_input(err: KeystoreError) {
-        match err {
-            KeystoreError::Backend(io) => {
-                assert_eq!(io.kind(), std::io::ErrorKind::InvalidInput);
-            }
-            other => panic!("expected Backend(InvalidInput), got {other:?}"),
-        }
-    }
-
-    /// **Proves:** `write` refuses a plaintext payload carrying no DIG
-    /// container magic.
-    ///
-    /// **Why it matters:** The OS credential store is defence-in-depth, not the
-    /// access-control primitive (§10.5) — on Windows it is a per-USER boundary,
-    /// readable by any process running as that user. A caller stashing an
-    /// unlock password or a raw mnemonic here would be relying on a boundary
-    /// that does not exist.
-    ///
-    /// **Catches:** a guard that is absent, or a no-op that returns `Ok` for
-    /// everything.
-    #[test]
-    fn write_rejects_unsealed_payload() {
-        let be = backend();
-        let err = be
-            .write(&BackendKey::new("identity"), b"hunter2")
-            .unwrap_err();
-        assert_invalid_input(err);
-        // And nothing was persisted behind the rejection.
-        assert!(!be.exists(&BackendKey::new("identity")).unwrap());
-    }
-
-    /// **Proves:** every container magic the crate can produce is accepted —
-    /// the two shipped scheme magics, the opaque container, and the `DIGHW1`
-    /// hardware envelope.
-    ///
-    /// **Why it matters:** An over-narrow allowlist is the guard's most likely
-    /// wrong shape, and the omission with teeth is `DIGHW1`: a
-    /// `HardwareBoundBackend` over this backend writes envelope bytes on every
-    /// single write, so dropping it breaks a shipped composition outright.
-    ///
-    /// **Catches:** an allowlist listing only the scheme magics, or only what
-    /// `format.rs` knows.
-    #[test]
-    fn write_accepts_every_known_container_magic() {
-        for magic in [
-            &b"DIGVK1"[..],
-            &b"DIGLW1"[..],
-            &b"DIGOP1"[..],
-            &b"DIGHW1"[..],
-        ] {
-            let be = backend();
-            let mut blob = magic.to_vec();
-            blob.extend_from_slice(&[0xAB; 16]);
-            let key = BackendKey::new("identity");
-            be.write(&key, &blob)
-                .unwrap_or_else(|e| panic!("magic {magic:?} must be accepted, got {e:?}"));
-            assert_eq!(be.read(&key).unwrap(), blob);
-        }
-    }
-
-    /// **Proves:** a payload SHORTER than a magic is rejected, not a panic.
-    ///
-    /// **Why it matters:** The guard reads a prefix. An unchecked `bytes[..6]`
-    /// slice would panic — inside a custody write, on caller-supplied data.
-    ///
-    /// **Catches:** an unbounded slice or a `try_into().unwrap()`.
-    #[test]
-    fn write_rejects_payload_shorter_than_magic() {
-        let be = backend();
-        for short in [&b""[..], b"D", b"DIG", b"DIGHW"] {
-            let err = be.write(&BackendKey::new("identity"), short).unwrap_err();
-            assert_invalid_input(err);
-        }
-    }
-
-    /// **Proves:** the guard's accept-set is exactly `format::is_known_magic`
-    /// plus the hardware envelope — checked by comparing the guard's answer to
-    /// those predicates' answer over a wide prefix corpus, rather than against
-    /// a second hand-written list.
-    ///
-    /// **Why it matters:** The failure this pins is DRIFT: a new container
-    /// magic added to `format.rs` alone would be silently unwritable to the OS
-    /// store. Re-listing the literals here would reproduce exactly the
-    /// duplication that lets that happen, so the oracle is the predicates
-    /// themselves.
-    ///
-    /// **Catches:** a guard that re-lists magic literals instead of delegating.
-    #[test]
-    fn guard_agrees_with_format_is_known_magic() {
-        let corpus: [&[u8]; 10] = [
-            b"DIGVK1", b"DIGLW1", b"DIGOP1", b"DIGHW1", b"DIGWX1", b"DIGXX9", b"NOTDIG", b"DIG",
-            b"", b"digvk1",
-        ];
-        for prefix in corpus {
-            let mut blob = prefix.to_vec();
-            blob.extend_from_slice(&[0x11; 16]);
-
-            let expected = <[u8; 6]>::try_from(&blob[..6]).is_ok_and(|m| {
-                crate::format::is_known_magic(&m) || crate::hardware::envelope::is_envelope(&blob)
-            });
-            assert_eq!(
-                is_dig_container(&blob),
-                expected,
-                "guard disagrees with the format predicates on prefix {prefix:?}"
-            );
-        }
-    }
-
-    /// **Proves:** `read` returns a pre-existing UNSEALED blob byte-identically
-    /// — the write guard narrows writes only.
+    /// **Proves:** `read` returns a blob written by an earlier crate version
+    /// byte-identically, whatever its prefix.
     ///
     /// **Why it matters:** §5.1 is a HARD rule: every blob any prior version
-    /// wrote must still read. A guard mistakenly applied to `read` would strand
-    /// bytes an earlier dig-keystore already persisted into a user's credential
-    /// store. The fixture is seeded through the raw store, not `write`, because
-    /// `write` can no longer produce such bytes.
+    /// wrote must still read. Any prefix-based precondition creeping onto the
+    /// read path would strand bytes an earlier dig-keystore already persisted
+    /// into a user's credential store — bytes only that store holds. The
+    /// fixture is seeded through the raw store, not `write`, so it models a
+    /// pre-existing entry rather than one this version produced.
     ///
-    /// **Catches:** the guard placed on the read path, or applied symmetrically
-    /// in a shared helper.
+    /// **Catches:** a container/shape check applied to `read`.
     #[test]
     fn read_returns_preexisting_unsealed_blob_byte_identically() {
         let legacy = b"hunter2-written-by-v0.6.1".to_vec();
@@ -891,19 +739,20 @@ mod tests {
         assert!(be.exists(&BackendKey::new("identity")).unwrap());
     }
 
-    /// **Proves:** the enumeration index still round-trips with the guard in
-    /// place — two sealed writes are both listed.
+    /// **Proves:** the enumeration index is written on a path that does not go
+    /// through the public `write` API — two writes are both listed, and the
+    /// index entry itself never passes `validate_key_name`.
     ///
-    /// **Why it matters:** `store_index` writes newline-joined key NAMES (never
-    /// a container) through the private `RawStore`. A guard placed in
-    /// `RawStore::set` instead of `KeychainBackend::write` would reject the
-    /// index write and silently break `list`; a name-based exemption added to
-    /// "fix" that would be a bypass where none is needed.
+    /// **Why it matters:** `store_index` persists newline-joined key NAMES
+    /// through the private `RawStore`, under the reserved `INDEX_ACCOUNT` that
+    /// `write` explicitly rejects. Routing the index through `write` would make
+    /// `list` self-defeating: the very name the public API refuses is the one
+    /// the index must store.
     ///
-    /// **Catches:** a guard at the wrong layer, and any `INDEX_ACCOUNT`
-    /// exemption inside `write`.
+    /// **Catches:** an index write re-routed through `KeychainBackend::write`,
+    /// or an `INDEX_ACCOUNT` exemption added inside it.
     #[test]
-    fn enumeration_index_survives_the_guard() {
+    fn enumeration_index_is_written_below_the_public_write_api() {
         let be = backend();
         be.write(&BackendKey::new("validator_bls"), &sealed(1))
             .unwrap();
@@ -912,6 +761,37 @@ mod tests {
         let mut names: Vec<String> = be.list("").unwrap().into_iter().map(|k| k.0).collect();
         names.sort();
         assert_eq!(names, vec!["validator_bls".to_owned(), "wallet".to_owned()]);
+
+        // The index really is in the store under the reserved account — and
+        // that account is one the public `write` refuses outright, which is
+        // what makes the private path necessary rather than incidental.
+        assert!(be.store.get(INDEX_ACCOUNT).unwrap().is_some());
+        assert!(be
+            .write(&BackendKey::new(INDEX_ACCOUNT), &sealed(9))
+            .is_err());
+    }
+
+    /// **Proves:** on a target with no supported credential store — Linux and
+    /// `wasm32` — `open` returns `None` (conformance C-29).
+    ///
+    /// **Why it matters:** C-29 was asserted in `SPEC.md` §10.5 with nothing
+    /// exercising it. The only other `open` call in the suite is gated to
+    /// Windows/macOS, so on Linux CI — the one place the claim has any content
+    /// — the stub was never run. The body is a literal `None` today, making
+    /// this drift protection: it fails the moment someone gives the excluded
+    /// targets a real implementation without revisiting the spec, which is
+    /// exactly how a conformance row rots into a rubber stamp.
+    ///
+    /// **Catches:** a fallback quietly introduced on an excluded target, and a
+    /// `Some` returned from the stub.
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[test]
+    fn open_returns_none_on_an_unsupported_target() {
+        assert!(
+            OsKeychainBackend::open("dig-keystore-test").is_none(),
+            "no credential store is supported on this target, and the crate \
+             performs no fallback of its own"
+        );
     }
 }
 
