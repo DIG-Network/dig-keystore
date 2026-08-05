@@ -1,18 +1,24 @@
 //! Storage backend abstraction.
 //!
-//! A `KeychainBackend` is any byte-blob KV store. The shipped `FileBackend`
-//! persists to the local filesystem with atomic (tmp + rename) writes. Planned
-//! future backends: `OsKeyringBackend` (macOS Keychain / Windows Credential
-//! Store / Secret Service), and hardware-signer backends (`LedgerBackend`,
-//! `YubiHsmBackend`) that proxy `sign` to an external device.
+//! A `KeychainBackend` is any byte-blob KV store. Three ship today:
+//! `MemoryBackend` (always available), `FileBackend` (feature `file-backend`,
+//! atomic tmp + rename writes to the local filesystem), and
+//! `OsKeychainBackend` (feature `os-keychain`, the host OS credential store on
+//! Windows/macOS — see its module docs for the access boundary it does and
+//! does not provide, and for why a machine service must not use it). Planned
+//! future backends: hardware-signer backends (`LedgerBackend`, `YubiHsmBackend`)
+//! that proxy `sign` to an external device.
 
 use crate::error::Result;
 
 #[cfg(feature = "file-backend")]
 mod file;
 mod memory;
+// `pub(crate)` (not private) so `crate::hardware::tests` can reach the
+// in-memory `test_support` doubles and compose a real `OsKeychainBackend`
+// under a `HardwareBoundBackend` without a live OS credential store.
 #[cfg(feature = "os-keychain")]
-mod os_keychain;
+pub(crate) mod os_keychain;
 
 #[cfg(feature = "file-backend")]
 pub use file::FileBackend;

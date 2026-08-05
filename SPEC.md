@@ -29,7 +29,8 @@ master seed handled by DIG code goes through this crate.
   delete) — §7.
 - The `SignerHandle<K>` signing surface and its secret-containment rules — §8.
 - The `Password` type — §9.
-- The `KeychainBackend` trait and the shipped `FileBackend` / `MemoryBackend` — §10.
+- The `KeychainBackend` trait and the shipped `FileBackend` / `MemoryBackend` /
+  `OsKeychainBackend` (OS credential store, Windows/macOS only) — §10.
 - The error catalog — §11.
 - Zeroization and other security properties — §12.
 - The `opaque` module — arbitrary-length password-sealed secrets, no `KeyScheme` — §15.
@@ -445,6 +446,54 @@ uses: **scratch backend** for encrypt-to-bytes/decrypt-from-bytes adapters (nota
 tests, and doc examples. It MUST NOT be used as durable storage — process exit drops
 all state. It satisfies the full §10.2 contract, including the `NotFound` error shape.
 
+### 10.5 `OsKeychainBackend` (feature `os-keychain`, Windows/macOS only)
+
+`OsKeychainBackend` stores each blob in the host OS credential store — Windows Credential
+Manager or macOS Keychain — via the `keyring` crate. It is a **storage location, not an
+access-control primitive**.
+
+- The crate's Argon2id + AES-256-GCM sealing (§3–§5) MUST remain the primary access control
+  for anything stored here; the OS credential store is defence-in-depth **only**.
+- Callers MUST NOT write an unlock password, passphrase, mnemonic, raw seed, or any other
+  plaintext secret to this backend; only blobs this crate has already sealed belong here.
+  This is a **caller obligation**. The backend is a byte-blob KV store and does not
+  inspect or constrain the payload — it cannot, because `HardwareBoundBackend` (§17.5a)
+  legitimately writes unwrapped, non-container bytes through its inner backend on `unbind`
+  and on a failed `bind`'s restore.
+- **Platform access boundary (normative, differs by platform).** On **macOS** the Keychain
+  applies a per-application ACL, but one gated by **user consent**: a different process
+  running as the same user triggers an authorization prompt the user may answer "Always
+  Allow", and the trusted-application designation rests on a code signature a same-user
+  process can generally overwrite. On **Windows**, generic Credential Manager entries are
+  protected by DPAPI under the logged-in user's key and are readable by **any process
+  running as that user** — a **per-user** boundary, not per-application. Nor is it
+  machine-local: entries are written with `CRED_PERSIST_ENTERPRISE`, so on a domain-joined
+  host the credential **roams with the user profile**, and the boundary is any process
+  running as that user on any machine they roam to. Implementations and consumers MUST NOT
+  assume a per-application boundary on Windows, MUST NOT assume the entry stays on the
+  machine that wrote it, and MUST NOT treat the macOS ACL as a hard boundary against a
+  same-user attacker.
+- **Not for a machine/system service.** The OS credential store is released by the **login
+  session**. A machine or system service — a node daemon running as SYSTEM or under a
+  non-interactive account — has no login session to release it, so such a service MUST NOT
+  use this backend; the passphrase-sealed `FileBackend` (§10.3) is the backend for that
+  case. This backend targets the user-application case, where secrets live and die with a
+  logged-in user.
+- **No fallback.** `open` returns `None` when no usable store exists; the crate performs
+  **no** fallback. Selecting an alternative backend (§10.3) is entirely the caller's
+  responsibility.
+- **Excluded targets.** `keyring` compiles only on `target_os = "windows"` /
+  `target_os = "macos"`. On Linux and `wasm32` the dependency is never pulled and `open`
+  MUST return `None`. Linux's kernel keyutils session keyring is readable by any same-UID
+  process and is non-persistent across logout, so it MUST NOT be a custody primary; the
+  passphrase-sealed `FileBackend` is the Linux primary.
+- **Read is unconditional.** `read` MUST return any previously stored blob
+  byte-identically, whatever its prefix (§5.1).
+- **Enumeration.** No native enumeration exists; a best-effort reserved index entry powers
+  `list` only. It is never authoritative for `read`/`write`/`delete`/`exists`, and is
+  written on a private path below the public `write` API — whose reserved-name check
+  refuses the index account outright.
+
 ---
 
 ## 11. Errors
@@ -509,7 +558,7 @@ Root re-exports (crate `dig-keystore`, importable as `dig_keystore`):
 - `Keystore<K>` — §7. `SignerHandle<K>` — §8. `Password` — §9.
 - `KeyScheme`, `scheme::{BlsSigning, L1WalletBls}` — §6.
 - `KeychainBackend`, `BackendKey`, `MemoryBackend`; `FileBackend` (feature
-  `file-backend`) — §10.
+  `file-backend`); `OsKeychainBackend` (feature `os-keychain`) — §10.
 - `KeystoreHeader`, `KdfParams`, `KdfId`, `CipherId`, `FORMAT_VERSION_V1` — §3–4.
 - `KeystoreError`, `Result` — §11.
 - `bls` module — convenience re-exports of `chia_bls::{sign, verify, PublicKey,
@@ -525,6 +574,7 @@ Root re-exports (crate `dig-keystore`, importable as `dig_keystore`):
 | Flag | Default | Effect |
 |---|---|---|
 | `file-backend` | **on** | Ships `FileBackend`. |
+| `os-keychain` | off | Ships `OsKeychainBackend` (Windows/macOS only; `open` returns `None` elsewhere). |
 | `password-strength` | off | `Password::strength()` via zxcvbn. |
 | `testing` | off | `testing` module (`MemoryBackend` re-export + `TEST_PASSWORD`); required by the integration-test suite. |
 | `eip2335` | off | **Reserved, no-op** — EIP-2335 import/export is not implemented. |
@@ -951,6 +1001,7 @@ properties:
 | C-25 | `unbind` returns a bound blob to a form a host with no hardware opens; a failed `unbind` leaves the stored bytes byte-identical | §17.5a |
 | C-26 | `bind` migrates an unwrapped blob up, is a no-op on an already-wrapped one, and restores the previous bytes when the new seal cannot be reopened from storage | §17.5a |
 | C-27 | An `unbind` the store did not take is reported as `HardwareStillBound`, never as success | §17.5a |
+| C-29 | `OsKeychainBackend::open` returns `None` on Linux/wasm and the crate performs no fallback | §10.5 |
 
 Test evidence: `src/hardware/tests.rs` (tier resolution, fail-closed policy, cross-device
 binding, envelope codec) and `tests/hardware_v1_compat.rs` (committed golden v1 blobs

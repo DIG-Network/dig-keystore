@@ -1,6 +1,6 @@
 [package]
 name = "dig-keystore"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2021"
 description = "Encrypted secret-key storage for DIG Network binaries (BLS signing + L1 wallet keys). AES-256-GCM + Argon2id, typed per-scheme magic files, zeroizing memory hygiene."
 license = "Apache-2.0 OR MIT"
@@ -72,8 +72,11 @@ parking_lot = "0.12"
 zxcvbn = { version = "3", optional = true }
 
 # OS-native credential store (`os-keychain` feature). Target-gated to Windows /
-# macOS — the only platforms whose credential store gates access per-application
-# (see `src/backend/os_keychain.rs` module docs). `default-features = false`
+# macOS — the only platforms with a native credential store this crate supports
+# (see `src/backend/os_keychain.rs` module docs for the boundary each one
+# actually provides: a consent-gated per-application ACL on macOS, and only a
+# per-USER DPAPI boundary on Windows).
+# `default-features = false`
 # selects only the native backends, so no dbus/libsecret system libraries are
 # pulled and CI stays free of system deps. Never compiled on Linux or wasm.
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
@@ -99,9 +102,10 @@ default = ["file-backend"]
 file-backend = []
 
 # Ships OsKeychainBackend (OS-native credential store: Windows Credential
-# Manager / macOS Keychain via `keyring`; other targets fall back to the file
-# backend). The `keyring` dependency is target-gated so it never compiles on
-# Linux or wasm.
+# Manager / macOS Keychain via `keyring`). On every other target `open` returns
+# `None` and the crate performs no fallback — choosing another backend is the
+# caller's decision. The `keyring` dependency is target-gated so it never
+# compiles on Linux or wasm.
 os-keychain = ["dep:keyring"]
 
 # Enables Password::strength via zxcvbn.

@@ -13,14 +13,37 @@ Concise, durable realizations from developing this crate. Context, not a change 
   full host cross-build). This keeps CI free of dbus/libsecret and keeps the wasm member building.
 
 - **Linux is deliberately excluded as a custody primary, not an oversight.** The kernel keyutils
-  session keyring is readable by any same-UID process (no per-application ACL) and is non-persistent
+  session keyring is readable by any same-UID process (no application separation at all — weaker
+  even than Windows Credential Manager, which at least encrypts at rest under DPAPI) and is non-persistent
   across reboot/logout — unsafe for custody and would lose the identity on logout. On Linux the
   passphrase-sealed file backend is the correct primary. This rationale is inherited from dig-app's
   original `OsCredentialStore`, which this backend absorbs so the ecosystem keeps one keystore impl.
 
-- **The OS ACL is the access-control primitive; DIGVK1/DIGOP1 sealing is defence-in-depth under it.**
-  An attacker who defeats the per-app ACL and dumps the entry gets the ciphertext; the sealing adds a
-  layer against a raw at-rest artifact but is not a second independent secret on this path.
+- **The SEAL is the access-control primitive; the OS credential store is defence-in-depth under it.**
+  This is the inverse of the rationale inherited from dig-app, and the inversion matters: the OS
+  boundary is far weaker than that rationale assumed. On **Windows** a generic Credential Manager
+  entry is DPAPI-protected under the logged-in *user's* key and is readable by **any process running
+  as that user** — a per-USER boundary, with no application separation at all, and not even a
+  machine-local one: `keyring` writes with `CRED_PERSIST_ENTERPRISE`, so on a domain-joined host
+  the credential roams with the user profile. On **macOS** the
+  Keychain does apply a per-application ACL, but it is gated by user consent: a same-user process
+  triggers an authorization prompt that can be answered "Always Allow", and the trusted-application
+  designation rests on a code signature a same-user process can generally overwrite. So an attacker
+  running as the user reaches the stored entry on both platforms and gets only ciphertext — which is
+  the whole point. Argon2id + AES-256-GCM is what stands between them and the key; treat the
+  credential store as a storage location, never as the thing keeping an attacker out.
+
+- **The backend cannot enforce "sealed payloads only" — that is a CALLER obligation (`SPEC.md` §10.5).**
+  A `write` guard rejecting non-container payloads was built and removed: `HardwareBoundBackend`
+  must write *unwrapped, non-container* bytes through its inner backend on `unbind` and on a failed
+  `bind`'s restore, and that restore is best-effort (`let _ = self.inner.write(..)`). With the guard
+  in place, a failed `bind` over a pre-migration blob had its restore silently rejected and left the
+  store holding a `DIGHW1` envelope the hardware had just proven it could not reopen — unrecoverable
+  custody loss, reported only as a wrap error. "Inner backend constrains payload shape" is
+  architecturally incompatible with "hardware backend can unbind"; an exemption hook would be a
+  public bypass. The obligation is stated in prose and pinned by
+  `unbind_returns_a_non_container_payload_through_the_os_keychain_backend` and
+  `a_failed_bind_restores_a_legacy_blob_through_the_os_keychain_backend` (C-25/C-26).
 
 - **OS credential stores have no native enumeration.** `list` is powered by a best-effort index
   entry (a reserved account, `__dig_keystore_index__`) holding the live key set. `read`/`write`/
