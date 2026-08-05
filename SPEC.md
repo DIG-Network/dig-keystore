@@ -555,8 +555,9 @@ Error `Display` strings MUST NOT contain secret material.
 
 Root re-exports (crate `dig-keystore`, importable as `dig_keystore`):
 
-- `Keystore<K>` — §7. `SignerHandle<K>` — §8. `Password` — §9.
-- `KeyScheme`, `scheme::{BlsSigning, L1WalletBls}` — §6.
+- `Password` — §9.
+- `Keystore<K>` (§7), `SignerHandle<K>` (§8), `KeyScheme` and
+  `scheme::{BlsSigning, L1WalletBls}` (§6) — all require feature `custody`, §18.
 - `KeychainBackend`, `BackendKey`, `MemoryBackend`; `FileBackend` (feature
   `file-backend`); `OsKeychainBackend` (feature `os-keychain`) — §10.
 - `KeystoreHeader`, `KdfParams`, `KdfId`, `CipherId`, `FORMAT_VERSION_V1` — §3–4.
@@ -575,6 +576,8 @@ Root re-exports (crate `dig-keystore`, importable as `dig_keystore`):
 |---|---|---|
 | `file-backend` | **on** | Ships `FileBackend`. |
 | `os-keychain` | off | Ships `OsKeychainBackend` (Windows/macOS only; `open` returns `None` elsewhere). |
+| `custody` | off | Ships the user-custody API: `Keystore<K>`, `SignerHandle<K>`, `KeyScheme`, `scheme::{BlsSigning, L1WalletBls}`, and the `scheme` module — §18. |
+| `hd-derivation` | off | Ships `SignerHandle::expose_secret` (§8). Implies `custody`. |
 | `password-strength` | off | `Password::strength()` via zxcvbn. |
 | `testing` | off | `testing` module (`MemoryBackend` re-export + `TEST_PASSWORD`); required by the integration-test suite. |
 | `eip2335` | off | **Reserved, no-op** — EIP-2335 import/export is not implemented. |
