@@ -34,7 +34,7 @@
 
 use zeroize::Zeroizing;
 
-/// A password used to unlock a [`crate::Keystore`].
+/// A password used to unlock a `Keystore`.
 ///
 /// The password is stored in a `Zeroizing<Vec<u8>>`; the underlying memory is
 /// wiped when the `Password` is dropped. `Password` is [`Clone`] so callers may
@@ -79,9 +79,9 @@ impl Password {
     /// Borrow the raw password bytes. The returned slice is valid only while
     /// the `Password` is alive.
     ///
-    /// Used internally by [`crate::kdf`] to feed Argon2id. External callers
+    /// Used internally by `kdf` to feed Argon2id. External callers
     /// generally should not need this — prefer handing the `Password` to a
-    /// [`Keystore`](crate::Keystore) method.
+    /// `Keystore` method.
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
