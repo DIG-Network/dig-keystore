@@ -46,6 +46,31 @@ jobs:
       - name: Check clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      # `--all-features` above turns the `custody` / `hd-derivation` gates ON, so
+      # neither it nor the coverage run below can observe a broken gate, and neither
+      # can they observe a `missing_docs` or type error that only appears when the
+      # custody module is compiled OUT. These two steps are the only ones that build
+      # the crate in a configuration a gate-respecting consumer actually uses.
+      - name: Clippy (core-only, custody compiled out)
+        run: cargo clippy --no-default-features --features file-backend,testing --all-targets -- -D warnings
+
+      - name: Clippy (custody without hd-derivation)
+        run: cargo clippy --no-default-features --features file-backend,testing,custody --all-targets -- -D warnings
+
+      # Backwards-compatibility (SPEC.md §5.1 / dig_ecosystem CLAUDE.md §5.1): the
+      # opaque golden vectors must still decode in a build with no custody surface at
+      # all. `dig-node`'s seed_store.rs classifies old blobs through this exact
+      # configuration, so a DIGVK1/DIGLW1 magic that stopped being recognised here
+      # would silently change how it reads content written by earlier versions.
+      - name: Golden opaque vectors (core-only build)
+        run: cargo test --no-default-features --features file-backend,testing --test opaque_vectors
+
+      # Proves the feature gates by compiling throwaway consumers under each
+      # configuration and asserting the exact rustc diagnostic. See the script header
+      # for why this cannot be an ordinary #[test].
+      - name: Public-surface feature-gate check
+        run: bash scripts/surface-check.sh
+
       # Coverage IS the test run: cargo-llvm-cov drives nextest under instrumentation,
       # gates at >=80% line coverage (build fails below the floor), and emits lcov for
       # visibility. nextest retries a failing test up to 2x (.config/nextest.toml) and

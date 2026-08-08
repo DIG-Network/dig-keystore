@@ -133,7 +133,7 @@ pub(crate) fn decrypt(
 
 /// AES-GCM tag size in bytes.
 ///
-/// Exposed at crate level so [`crate::keystore`] and [`crate::format`] can
+/// Exposed at crate level so the keystore and [`crate::format`] layers can
 /// reason about the total file-length arithmetic (`payload_len = secret.len() + TAG_SIZE`).
 pub(crate) const TAG_SIZE: usize = 16;
 

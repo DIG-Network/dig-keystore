@@ -131,14 +131,14 @@ pub enum KeystoreError {
     ///
     /// Deliberate: overwriting a keystore file is almost always an operator
     /// error. Callers that really want to replace a keystore should
-    /// [`crate::Keystore::delete`] first, or simply [`crate::Keystore::change_password`]
-    /// + [`crate::Keystore::rotate_kdf`] which rotate in place.
+    /// `Keystore::delete` first, or simply `Keystore::change_password`
+    /// + `Keystore::rotate_kdf` which rotate in place.
     #[error("key path already exists: {0:?}")]
     AlreadyExists(String),
 
     /// The decrypted plaintext has the wrong length for the key scheme.
     ///
-    /// Each [`crate::KeyScheme`] declares a fixed [`SECRET_LEN`](crate::KeyScheme::SECRET_LEN).
+    /// Each `KeyScheme` declares a fixed `SECRET_LEN`.
     /// If `unlock` decrypts successfully but the plaintext length disagrees
     /// with the scheme (e.g., file was encrypted under v1 with a 32-byte seed
     /// and this build expects 48), we reject. Normally impossible once the

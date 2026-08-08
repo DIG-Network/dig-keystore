@@ -1,6 +1,6 @@
 [package]
 name = "dig-keystore"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 description = "Encrypted secret-key storage for DIG Network binaries (BLS signing + L1 wallet keys). AES-256-GCM + Argon2id, typed per-scheme magic files, zeroizing memory hygiene."
 license = "Apache-2.0 OR MIT"
@@ -10,6 +10,10 @@ documentation = "https://docs.rs/dig-keystore"
 readme = "README.md"
 keywords = ["dig-network", "keystore", "bls", "chia", "encryption"]
 categories = ["cryptography::cryptocurrencies"]
+
+[package.metadata.docs.rs]
+all-features = true
+
 # Only ship the library surface to crates.io. Explicit allow-list because the
 # repo also tracks build artefacts (target/) and CI workflow files that must
 # NOT end up in the published tarball — crates.io rejects > 10 MiB uploads.
@@ -25,6 +29,7 @@ include = [
     # gitignore-style, so an unanchored "SPEC.md" ALSO matches the nested duplicate
     # at any depth and would ship both. Verify with `cargo package --list`.
     "/SPEC.md",
+    "scripts/surface-check.sh",
     "Cargo.toml",
     "Cargo.lock",
     "README.md",
@@ -101,6 +106,25 @@ default = ["file-backend"]
 # Ships FileBackend (filesystem KeychainBackend).
 file-backend = []
 
+# Ships the user-custody API: the typed `Keystore<K>` container, the
+# `KeyScheme` implementations (`BlsSigning`, `L1WalletBls`), and the
+# `SignerHandle<K>` returned by unlocking one.
+#
+# DELIBERATELY NOT IN `default`. The crate core is machine-key sealing, which
+# has no notion of whose key it is; custody models a *user's* identity key.
+# A consumer that only needs sealing — the DIG node engine, whose
+# identity-agnostic boundary is dig_ecosystem #908 — leaves this off so the
+# custody types are not nameable in its dependency closure. See `SPEC.md` §18,
+# including the honest limits of that under Cargo feature unification.
+custody = []
+
+# Ships `SignerHandle::expose_secret`, which hands back the raw secret bytes.
+# Split from `custody` because the overwhelming majority of custody consumers
+# want to *sign*, not to extract: only hierarchical-deterministic wallets and
+# key-derivation libraries need the seed itself. Implies `custody` — the method
+# is on a type that does not exist without it.
+hd-derivation = ["custody"]
+
 # Ships OsKeychainBackend (OS-native credential store: Windows Credential
 # Manager / macOS Keychain via `keyring`). On every other target `open` returns
 # `None` and the crate performs no fallback — choosing another backend is the
@@ -129,29 +153,31 @@ missing_docs = "warn"
 [[test]]
 name = "roundtrip"
 path = "tests/roundtrip.rs"
-required-features = ["testing"]
+required-features = ["testing", "custody"]
 
 [[test]]
 name = "wrong_password"
 path = "tests/wrong_password.rs"
-required-features = ["testing"]
+required-features = ["testing", "custody"]
 
 [[test]]
 name = "tamper"
 path = "tests/tamper.rs"
-required-features = ["testing"]
+required-features = ["testing", "custody"]
 
 [[test]]
 name = "vectors"
 path = "tests/vectors.rs"
-required-features = ["testing"]
+required-features = ["testing", "custody", "hd-derivation"]
 
 [[test]]
 name = "keystore_branches"
 path = "tests/keystore_branches.rs"
-required-features = ["testing"]
+required-features = ["testing", "custody"]
 
 [[test]]
+# Also needs `hd-derivation`: the v1 golden-blob assertions call
+# `signer.expose_secret()` to pin the recovered seed length.
 name = "hardware_v1_compat"
 path = "tests/hardware_v1_compat.rs"
-required-features = ["testing"]
+required-features = ["testing", "custody", "hd-derivation"]

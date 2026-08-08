@@ -1,15 +1,31 @@
 //! `SignerHandle` — the unlocked, signing-capable handle returned by `Keystore::unlock`.
 //!
 //! A `SignerHandle<K>` owns a `Zeroizing<Vec<u8>>` copy of the decrypted secret
-//! and the derived public key. It exposes `sign` and `public_key`; raw secret
-//! bytes can never be extracted. Drop zeroizes the secret.
+//! and the derived public key, and exposes `sign` and `public_key`. Drop
+//! zeroizes the secret.
+//!
+//! # What the handle actually guarantees about the secret
+//!
+//! The secret leaves the handle by exactly one route: [`SignerHandle::expose_secret`],
+//! which is gated behind the non-default `hd-derivation` feature. It returns a
+//! **borrow** of the internal `Zeroizing` buffer — the bytes are never handed
+//! over as an owned value, so they still wipe when the handle drops (unless the
+//! caller copies them out, which its docs warn against). Without that feature
+//! the method does not exist and the only ways to use the secret are `sign` /
+//! `try_sign`.
+//!
+//! This is deliberately weaker than "the secret can never be extracted", which
+//! is what these docs used to claim while `expose_secret` sat a few dozen lines
+//! below. HD wallets and key-derivation libraries genuinely need the seed, so
+//! the honest property is a narrow, named, feature-gated borrow — not an
+//! absence.
 
 use std::marker::PhantomData;
 
 use zeroize::Zeroizing;
 
+use crate::custody::scheme::KeyScheme;
 use crate::error::Result;
-use crate::scheme::KeyScheme;
 
 /// The unlocked handle. Drop wipes the secret.
 ///
@@ -68,6 +84,8 @@ impl<K: KeyScheme> SignerHandle<K> {
     /// Typical usage:
     ///
     /// ```no_run
+    /// # // `cargo` builds doctests with the crate's own enabled features, so
+    /// # // this only compiles (and only exists) under `hd-derivation`.
     /// # use dig_keystore::{scheme::L1WalletBls, SignerHandle};
     /// # fn get_signer() -> SignerHandle<L1WalletBls> { unimplemented!() }
     /// let signer = get_signer();
@@ -79,6 +97,11 @@ impl<K: KeyScheme> SignerHandle<K> {
     /// `let copy = signer.expose_secret().to_owned();`, stop and consider
     /// whether you really need to own the bytes — and if so, wrap the copy
     /// in `Zeroizing::<Vec<u8>>::from(...)`.
+    ///
+    /// Requires the `hd-derivation` feature. It is split out from `custody`
+    /// because most custody consumers want to sign, not to extract; making
+    /// extraction a second, explicit opt-in keeps it out of their surface.
+    #[cfg(feature = "hd-derivation")]
     pub fn expose_secret(&self) -> &[u8] {
         &self.secret
     }
@@ -108,13 +131,14 @@ impl<K: KeyScheme> std::fmt::Debug for SignerHandle<K> {
 }
 
 // Explicitly NOT implementing AsRef<[u8]>, Deref, or into_raw() on SignerHandle.
-// The secret never leaves the handle by default; `expose_secret` is the one
-// deliberate, clearly-named opt-out for HD-wallet consumers.
+// The secret never leaves the handle by default; `expose_secret` (feature
+// `hd-derivation`) is the one deliberate, clearly-named opt-out for HD-wallet
+// consumers, and it borrows rather than yielding ownership.
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scheme::BlsSigning;
+    use crate::custody::scheme::BlsSigning;
 
     /// **Proves:** the `Debug` impl of `SignerHandle` does not print the raw
     /// secret bytes. We construct a handle with secret `0xAA` × 32 and
@@ -204,6 +228,7 @@ mod tests {
         assert_eq!(s1.to_bytes(), s2.to_bytes());
     }
 
+    #[cfg(feature = "hd-derivation")]
     /// **Proves:** `expose_secret` returns the exact seed bytes that were
     /// used to construct the handle — byte-for-byte equality.
     ///
@@ -225,6 +250,7 @@ mod tests {
         assert_eq!(handle.expose_secret(), &bytes);
     }
 
+    #[cfg(feature = "hd-derivation")]
     /// **Proves:** the byte slice returned by `expose_secret` is tied to the
     /// handle's lifetime — once the handle is dropped, the borrow must end.
     ///
