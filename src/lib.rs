@@ -49,7 +49,7 @@
 //! Requires the `custody` feature:
 //!
 //! ```toml
-//! dig-keystore = { version = "0.7", features = ["custody"] }
+//! dig-keystore = { version = "0.8", features = ["custody"] }
 //! ```
 #![cfg_attr(
     feature = "custody",
