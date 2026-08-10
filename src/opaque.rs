@@ -39,6 +39,31 @@
 //! `tests/opaque_vectors.rs` (native) and `wasm/tests/opaque_wasm.rs` (wasm)
 //! share one deterministic known-answer vector as an empirical pin of this
 //! property, in addition to the structural argument above.
+//!
+//! # Entropy contract (normative — `SPEC.md` §15.5)
+//!
+//! Every salt and nonce this module writes comes from the OPERATING SYSTEM's
+//! CSPRNG. [`seal`] is the ONLY sealing entry point an ordinary consumer can
+//! name, and it hard-wires [`rand_core::OsRng`]; there is no parameter, env
+//! var, or feature on the default surface that can substitute a different
+//! source.
+//!
+//! The deterministic variant [`seal_with_rng`] exists solely to pin the
+//! cross-target known-answer vector, and is gated behind the non-default
+//! `test-vectors` feature. That gate is the enforcement, not the doc-comment
+//! above it: without the feature the symbol does not resolve, so a
+//! predictable-RNG sealing path is a COMPILE ERROR in any production
+//! dependency closure rather than a review catch. `scripts/surface-check.sh`
+//! proves the gate by compiling a probe consumer that names it and asserting
+//! `E0432`.
+//!
+//! `R: RngCore + CryptoRng` on [`seal_with_rng`] is a second, weaker line:
+//! it makes `rand::rngs::SmallRng` a type error (`E0277`), but it does NOT
+//! make a *seeded* CSPRNG one — `ChaCha20Rng::seed_from_u64(n)` satisfies
+//! `CryptoRng` while carrying only 64 bits of unpredictability. Seed
+//! PROVENANCE is not expressible in Rust's type system, which is exactly why
+//! the feature gate (reachability), not the bound (type), is what protects
+//! production here.
 
 use rand_core::{CryptoRng, RngCore};
 use zeroize::Zeroizing;
@@ -61,16 +86,59 @@ pub const MAGIC: [u8; 6] = *b"DIGOP1";
 pub const SCHEME_ID: u16 = 0x0004;
 
 /// Seal `secret` (any length, including empty) under `password`, returning
-/// the encoded container bytes. Uses OS randomness for the salt + nonce.
+/// the encoded container bytes.
 ///
-/// See [`seal_with_rng`] for the deterministic-RNG variant used in tests.
+/// The 128-bit Argon2id salt and 96-bit AES-GCM nonce are drawn from
+/// [`rand_core::OsRng`] — the operating system CSPRNG (`getrandom(2)` /
+/// `BCryptGenRandom` / `crypto.getRandomValues` under wasm). This is the only
+/// sealing entry point on the crate's default surface, and the RNG is not a
+/// parameter of it: see the module-level "Entropy contract".
+///
+/// The deterministic variant used to pin the cross-target known-answer vector
+/// is `seal_with_rng`, gated behind the non-default `test-vectors` feature.
 pub fn seal(password: &Password, secret: &[u8], kdf_params: KdfParams) -> Result<Vec<u8>> {
-    seal_with_rng(password, secret, kdf_params, &mut rand_core::OsRng)
+    seal_with_os_or_given_rng(password, secret, kdf_params, &mut rand_core::OsRng)
 }
 
-/// Like [`seal`] but with a caller-supplied RNG. Production callers MUST use
-/// [`seal`] (OS RNG); this exists for deterministic test fixtures.
+/// **Test vectors only — gated behind the non-default `test-vectors` feature.**
+///
+/// Like [`seal`] but with a caller-supplied RNG, so a known-answer vector can
+/// be asserted byte-identical on native and `wasm32-unknown-unknown`
+/// (`tests/opaque_vectors.rs` and `wasm/tests/opaque_wasm.rs`).
+///
+/// # ⚠️ Never seal a real secret through this
+///
+/// A caller-supplied RNG is a caller-supplied salt and nonce. Seeded from a
+/// small integer, the Argon2id salt becomes precomputable and the AES-GCM
+/// nonce predictable, so an attacker who later obtains the blob attacks the
+/// password with a rainbow table instead of a per-blob KDF. That is the
+/// Milk Sad / Trust Wallet defect class (CVE-2023-31290, CVE-2022-32969) and
+/// no test can observe it in the output bytes — only reading the entropy
+/// source can.
+///
+/// The `test-vectors` feature is what keeps that reachable only from a test
+/// build: it is off by default, no production consumer in the ecosystem
+/// enables it, and `scripts/surface-check.sh` asserts a default-features
+/// consumer naming this function fails to compile with `E0432`.
+#[cfg(feature = "test-vectors")]
 pub fn seal_with_rng<R: RngCore + CryptoRng>(
+    password: &Password,
+    secret: &[u8],
+    kdf_params: KdfParams,
+    rng: &mut R,
+) -> Result<Vec<u8>> {
+    seal_with_os_or_given_rng(password, secret, kdf_params, rng)
+}
+
+/// The single sealing implementation, shared by [`seal`] (which pins
+/// [`rand_core::OsRng`]) and the `test-vectors`-gated `seal_with_rng`.
+///
+/// Deliberately crate-private: making the RNG a parameter is the whole risk
+/// this module is guarding, so the parameterised form is not part of the
+/// default public surface. Keeping ONE body is what makes the known-answer
+/// vector meaningful — the deterministic test exercises the identical code
+/// path production uses, with only the RNG swapped.
+fn seal_with_os_or_given_rng<R: RngCore + CryptoRng>(
     password: &Password,
     secret: &[u8],
     kdf_params: KdfParams,
@@ -101,8 +169,9 @@ pub fn seal_with_rng<R: RngCore + CryptoRng>(
     Ok(encode_file(&header, &ciphertext_and_tag))
 }
 
-/// Open a blob produced by [`seal`]/[`seal_with_rng`], returning the
-/// original secret bytes wrapped in [`Zeroizing`].
+/// Open a blob produced by [`seal`] (or, in a `test-vectors` build, by
+/// `seal_with_rng`), returning the original secret bytes wrapped in
+/// [`Zeroizing`].
 ///
 /// # Errors
 ///
@@ -236,25 +305,29 @@ mod tests {
         assert!(!verify_password(&Password::from("wrong"), &blob));
     }
 
-    /// **Proves:** `seal_with_rng` is a pure, deterministic function of its
+    /// **Proves:** the sealing body is a pure, deterministic function of its
     /// inputs — the exact byte-for-byte KAT vector shared with
     /// `tests/opaque_vectors.rs` (native) and `wasm/tests/opaque_wasm.rs`
     /// (wasm-bindgen-test).
     ///
     /// **Why it matters:** This is the anchor of the native↔wasm
-    /// byte-compatibility proof (dig_ecosystem #147 Phase A): the wasm
-    /// binding's `sealWithSeed` test helper calls the identical
-    /// `seal_with_rng` with the identical seed, so both targets MUST agree
+    /// byte-compatibility proof (dig_ecosystem #147 Phase A): the wasm suite
+    /// calls the identical body (via the `test-vectors`-gated
+    /// `seal_with_rng`) with the identical seed, so both targets MUST agree
     /// on this constant. If they ever disagreed, Phase B's "old blobs still
     /// open" guarantee would be unverifiable across targets.
     ///
     /// **Catches:** any change to the RNG algorithm, field ordering, or
     /// cipher/KDF wiring that would silently change the container's bytes
     /// for identical inputs.
+    ///
+    /// Calls the crate-private body directly so the vector is still pinned in
+    /// a build WITHOUT the `test-vectors` feature — the gate must not cost
+    /// coverage of the format itself.
     #[test]
     fn deterministic_kat_matches_pinned_vector() {
         let mut rng = ChaCha20Rng::seed_from_u64(KAT_SEED);
-        let blob = seal_with_rng(
+        let blob = seal_with_os_or_given_rng(
             &Password::from(KAT_PASSWORD),
             KAT_SECRET,
             KdfParams::FAST_TEST,

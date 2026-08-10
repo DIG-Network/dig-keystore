@@ -62,8 +62,14 @@ jobs:
       # all. `dig-node`'s seed_store.rs classifies old blobs through this exact
       # configuration, so a DIGVK1/DIGLW1 magic that stopped being recognised here
       # would silently change how it reads content written by earlier versions.
+      # `test-vectors` is required because the KAT suite calls
+      # `opaque::seal_with_rng`, which that non-default feature gates
+      # (dig_ecosystem #2549 — a caller-chosen RNG must not be nameable from a
+      # production dependency closure). Enabling it HERE is correct and is not
+      # a hole: this is a test invocation, and `scripts/surface-check.sh` below
+      # separately proves a default-features consumer cannot name it.
       - name: Golden opaque vectors (core-only build)
-        run: cargo test --no-default-features --features file-backend,testing --test opaque_vectors
+        run: cargo test --no-default-features --features file-backend,testing,test-vectors --test opaque_vectors
 
       # Proves the feature gates by compiling throwaway consumers under each
       # configuration and asserting the exact rustc diagnostic. See the script header
@@ -120,6 +126,26 @@ jobs:
 
       - name: clippy (dig-keystore-wasm, wasm32 target)
         run: cargo clippy -p dig-keystore-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
+
+      # THE SHIPPED CONFIGURATION, and the only step that builds it.
+      #
+      # `--all-targets` above compiles the test targets too, and Cargo unifies
+      # dev-dependency features into the lib whenever it builds tests — so that
+      # step sees `dig-keystore/test-vectors` and `rand_chacha` enabled and
+      # would happily compile a reintroduced `sealWithSeed`. This step does
+      # not: a plain release build resolves ONLY `[dependencies]`, exactly as
+      # `npm run build:bundler` does in publish-npm.yml. It is what turns
+      # "a seeded RNG must not reach the wallet artefact" into a build failure
+      # (E0433 / E0425) rather than a review catch. dig_ecosystem #2549.
+      - name: release build of the SHIPPED cdylib (no dev-dep feature unification)
+        run: cargo build -p dig-keystore-wasm --target wasm32-unknown-unknown --release
+
+      # Native test: pins the exact `#[wasm_bindgen]` export set, scans the
+      # binding source for seeded-RNG tokens, and asserts the manifest keeps
+      # `rand_chacha` + `test-vectors` on the dev edge. Runs on the host
+      # because it reads repo files; it is `cfg`'d out under wasm32.
+      - name: shipped-surface guard (entropy-source pin)
+        run: cargo test -p dig-keystore-wasm --test shipped_surface
 
       - uses: actions/setup-node@v4
         with:

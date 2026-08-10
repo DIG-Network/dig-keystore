@@ -193,3 +193,63 @@ the rendered module docs cited "SPEC.md §17" as if resolvable. If a repo has tw
 its spec, the packaged one is the one that ships — check `include` whenever a spec section
 is added.
 
+## Entropy sources (0.9.0) — durable realizations
+
+### A test fixture in a shipped artefact is not a test fixture
+
+`sealWithSeed(password, secret, seed: u64)` existed for one legitimate reason: proving the
+native and wasm builds produce byte-identical containers. It was correctly named, carried a
+"never use this for a real secret" doc block — and was reachable from JavaScript in the
+published `@dignetwork/dig-keystore-wasm` package, on the same module object the Chrome
+extension's offscreen vault holds to encrypt BIP-39 wallet entropy, one autocomplete entry
+away from the real `seal`.
+
+Every part of that was deliberate, including a `[dependencies]` comment explaining that
+`rand_chacha` was a REGULAR (not dev) dependency specifically so the fixture would build. The
+reasoning was locally correct and globally wrong: a `wasm-bindgen-test` binary links the
+crate's own dev-dependencies, so the vector never needed an EXPORT — it needed the SEAM. It
+now calls `opaque::seal_with_rng` directly, and the proof is strictly stronger for losing the
+pass-through.
+
+Generalised: ask what a fixture needs to REACH, not what it needs to CALL. Exporting the
+deterministic path was a strictly larger change than the test required, and the extra surface
+outlived the memory of why it was there.
+
+### `CryptoRng` is necessary and nowhere near sufficient
+
+`R: RngCore + CryptoRng` is the right bound and worth pinning (`SmallRng` is `E0277`,
+conformance O-7). But `ChaCha20Rng::seed_from_u64(42)` satisfies `CryptoRng` on 64 bits of
+entropy — the exact shape of the shipped defect. Seed PROVENANCE is not expressible in Rust's
+type system, so a bound can never be the control for this class. Reachability can:
+`seal_with_rng` sits behind the non-default `test-vectors` feature and `rand_chacha` is a
+dev-dependency, so the weak path is `E0432`/`E0433` in a production build.
+
+Corollary for reviewers: `R: RngCore + CryptoRng` on a signature proves the source is a CSPRNG
+*algorithm*. It proves nothing about the seed. Read the call site.
+
+### Dev-dependency feature unification is what makes the gate real — and is also the trap
+
+Cargo unifies dev-dependency features into the library only when building TEST targets. The
+design leans on exactly that: `wasm-pack test --node` sees `test-vectors`, `wasm-pack build
+--release` does not, so the fixture is available to the proof and absent from the artefact.
+
+The trap is that `cargo clippy --all-targets` builds tests, so it unifies too — a reintroduced
+`sealWithSeed` compiles cleanly under the repo's pre-existing wasm clippy step. CI therefore
+has a SEPARATE `cargo build -p dig-keystore-wasm --target wasm32-unknown-unknown --release`
+step. Any "is it in the shipped artefact?" question must build the shipped configuration; an
+`--all-targets` green says nothing about it.
+
+### This defect class is invisible to behavioural testing, so the guard reads source
+
+Milk Sad (CVE-2023-31290), Trust Wallet (CVE-2022-32969) and Profanity all shipped passing
+suites. Output from a 64-bit-seeded ChaCha20 is indistinguishable from OS-CSPRNG output by
+inspection or by any assertion over the bytes. The one thing behaviour CAN show is a STUCK
+source — hence `successive_seals_differ_so_the_salt_and_nonce_are_live`, which checks the salt
+range and the nonce range SEPARATELY: a varying nonce alone would change the ciphertext and
+pass a whole-blob comparison while the salt sat constant.
+
+Everything else is structural: `scripts/surface-check.sh` compiles probe consumers and asserts
+rustc diagnostics, and `wasm/tests/shipped_surface.rs` pins the export set and scans the
+binding source. Both carry matched positive controls, because a probe that fails for the wrong
+reason looks exactly like a gate doing its job.
+

@@ -536,6 +536,7 @@ Error `Display` strings MUST NOT contain secret material.
 | Crash-safe persistence | tmp + fsync + atomic rename (+ Unix dir fsync) in `FileBackend` | OS-level |
 | File-system access control | Unix mode `0700` dir / `0600` files | Unix only |
 | Memory safety | `unsafe_code = "forbid"` crate-wide | Compiler-enforced |
+| Salt/nonce unpredictability | Every salt and nonce is drawn from the OS CSPRNG (`rand_core::OsRng`); no entry point on the default public surface takes an RNG, a seed, or any caller-supplied entropy (§15.5) | Compiler-enforced (feature gate) |
 
 **Non-guarantees (explicit).**
 
@@ -580,6 +581,7 @@ Root re-exports (crate `dig-keystore`, importable as `dig_keystore`):
 | `hd-derivation` | off | Ships `SignerHandle::expose_secret` (§8). Implies `custody`. |
 | `password-strength` | off | `Password::strength()` via zxcvbn. |
 | `testing` | off | `testing` module (`MemoryBackend` re-export + `TEST_PASSWORD`); required by the integration-test suite. |
+| `test-vectors` | off | Ships `opaque::seal_with_rng`, the ONLY entry point whose RNG — and therefore whose salt and nonce — the caller chooses. Exists solely to pin the native↔wasm known-answer vector (§16.3). A production build MUST NOT enable it; §15.5. |
 | `eip2335` | off | **Reserved, no-op** — EIP-2335 import/export is not implemented. |
 | `chia-keychain` | off | **Reserved, no-op** — Chia `.keychain` import is not implemented. |
 
@@ -679,17 +681,21 @@ pub const MAGIC: [u8; 6] = *b"DIGOP1";
 pub const SCHEME_ID: u16 = 0x0004;
 
 pub fn seal(password: &Password, secret: &[u8], kdf_params: KdfParams) -> Result<Vec<u8>>;
+pub fn open(password: &Password, blob: &[u8]) -> Result<Zeroizing<Vec<u8>>>;
+pub fn verify_password(password: &Password, blob: &[u8]) -> bool;
+
+// Feature `test-vectors` ONLY — absent from the default surface (§15.5).
+#[cfg(feature = "test-vectors")]
 pub fn seal_with_rng<R: RngCore + CryptoRng>(
     password: &Password, secret: &[u8], kdf_params: KdfParams, rng: &mut R,
 ) -> Result<Vec<u8>>;
-pub fn open(password: &Password, blob: &[u8]) -> Result<Zeroizing<Vec<u8>>>;
-pub fn verify_password(password: &Password, blob: &[u8]) -> bool;
 ```
 
 - `seal` MUST accept `secret` of any length, including empty, and MUST NOT truncate, pad, or
   otherwise transform it — `open` MUST recover the exact original bytes.
-- `seal` uses OS randomness (`rand_core::OsRng`) for the salt + nonce; `seal_with_rng` exists
-  for deterministic test fixtures only (production callers MUST use `seal`).
+- `seal` MUST use OS randomness (`rand_core::OsRng`) for the salt + nonce, and MUST NOT expose
+  the RNG as a parameter. `seal_with_rng` exists for the cross-target known-answer vector only
+  and MUST remain behind the non-default `test-vectors` feature (§15.5).
 - `open` MUST reject a blob whose `MAGIC`/`SCHEME_ID` are not `DIGOP1`/`0x0004` with
   `KeystoreError::SchemeMismatch` — including a well-formed `DIGVK1`/`DIGLW1` `Keystore<K>`
   file. This is the same type-confusion protection §3.3 gives typed schemes.
@@ -709,8 +715,48 @@ pub fn verify_password(password: &Password, blob: &[u8]) -> bool;
 | O-3 | `open` rejects a `DIGVK1`/`DIGLW1` blob (or any other magic) with `SchemeMismatch` |
 | O-4 | `open` collapses wrong-password and tamper failures to `DecryptFailed` (§5) |
 | O-5 | `is_known_magic` recognizes `DIGOP1` additively — `DIGVK1`/`DIGLW1` decoding is unchanged |
+| O-6 | A consumer on the DEFAULT feature set cannot NAME `opaque::seal_with_rng` — compiling one is `E0432` (`scripts/surface-check.sh`) |
+| O-7 | A non-`CryptoRng` source (`rand::rngs::SmallRng`) at the `seal_with_rng` seam is `E0277` (`scripts/surface-check.sh`) |
 
-Test evidence: `src/opaque.rs` unit tests, `tests/opaque_vectors.rs` (public-API-level KAT).
+Test evidence: `src/opaque.rs` unit tests, `tests/opaque_vectors.rs` (public-API-level KAT),
+`scripts/surface-check.sh` (O-6/O-7, with matched positive controls).
+
+### 15.5 Entropy contract (normative)
+
+**Every salt and every nonce this crate writes MUST come from the operating system's CSPRNG.**
+
+- The salt is 128 bits and the nonce 96 bits, both drawn from `rand_core::OsRng` —
+  `getrandom(2)` / `BCryptGenRandom` / `crypto.getRandomValues` under `wasm32`. A fresh pair is
+  drawn per `seal`, per `change_password`, and per `rotate_kdf`, so an AES-GCM
+  `(key, nonce)` collision requires BOTH a 128-bit salt collision and a 96-bit nonce collision.
+- Where this crate generates key material rather than sealing it (`KeyScheme::generate`), the
+  secret is 256 bits from the same source.
+- **No entry point on the default public surface accepts an RNG, a seed, or any other
+  caller-supplied entropy.** `seal` hard-wires `OsRng`; the RNG-parameterised body is
+  crate-private.
+
+**How this is ENFORCED, and why documentation is not enough.**
+
+A predictable salt/nonce (or a predictable seed) is the defect class of Milk Sad
+(CVE-2023-31290, libbitcoin-explorer: Mersenne Twister from a 32-bit timestamp), Trust Wallet
+(CVE-2022-32969: 32-bit-seeded MT19937 mnemonics), and Profanity (~$3.3M). All three shipped
+passing test suites, because the output of a weak generator is **indistinguishable from a
+strong one by inspection or by any assertion over the bytes**. Only reading the entropy source
+proves anything, so the contract is held by REACHABILITY, in three layers:
+
+1. **Feature gate (primary).** `opaque::seal_with_rng` exists only under `test-vectors`, which
+   is off by default and enabled by no production consumer in the ecosystem. Naming it from a
+   default build is `E0432` — proven by `scripts/surface-check.sh`, with a matched positive
+   control so a broken probe cannot masquerade as a passing gate.
+2. **Dependency graph.** `rand_chacha` — the crate that can construct a *seeded* CSPRNG — is a
+   DEV-dependency. `ChaCha20Rng::seed_from_u64` is therefore not nameable anywhere in `src/`
+   production code (`E0433`). Only `rand_core` (`OsRng` and the `CryptoRng` bound) is a normal
+   dependency.
+3. **Type bound (secondary, and deliberately labelled weaker).** `R: RngCore + CryptoRng` makes
+   `rand::rngs::SmallRng` a compile error (`E0277`, conformance O-7). It does **NOT** make a
+   *seeded* CSPRNG one: `ChaCha20Rng::seed_from_u64(n)` satisfies `CryptoRng` on 64 bits of
+   entropy. Seed provenance is not expressible in Rust's type system — which is precisely why
+   layers 1 and 2, not this one, are what protect production.
 
 ---
 
@@ -746,9 +792,21 @@ crates.io, and publishes to npm as `@dignetwork/dig-keystore-wasm` via `wasm-pac
 | `open(password, blob)` | `(string, Uint8Array) -> Uint8Array`, throws | Direct call to `opaque::open`. Throws (rejects) with the `KeystoreError` `Display` string on wrong password, tampering, or a non-opaque blob (§15.3). |
 | `verifyPassword(password, blob)` | `(string, Uint8Array) -> boolean` | Direct call to `opaque::verify_password`. Never throws. |
 | `sealStrong(password, secret)` | `(string, Uint8Array) -> Uint8Array`, throws | Direct call to `opaque::seal` with `KdfParams::STRONG` (256 MiB / 4 iterations / 4 lanes) instead of `DEFAULT` — for a caller's high-value-secret option (dig_ecosystem #147 Phase B: the extension's `ARGON2_STRONG` wallet preset). Opened by the SAME `open` as a `seal`-produced blob; the preset is recorded in the blob's own self-describing header, not tracked by the caller. |
-| `sealWithSeed(password, secret, seed)` | `(string, Uint8Array, bigint) -> Uint8Array`, throws | **Test/fixture-only.** Deterministic `ChaCha20Rng::seed_from_u64(seed)` seal at `KdfParams::FAST_TEST`, for cross-target KAT proofs only (§16.3). MUST NOT be used to seal a real secret — the RNG is trivially predictable. |
 
-Every real export (`seal`/`sealStrong`/`open`/`verifyPassword`) is a **direct, non-branching** call into
+This table is EXHAUSTIVE and is pinned mechanically by
+`wasm/tests/shipped_surface.rs::wasm_export_set_is_exactly_the_pinned_surface`. No other
+`#[wasm_bindgen]` export may exist.
+
+> **Removed in `dig-keystore-wasm` 0.3.0 (dig_ecosystem #2549):**
+> `sealWithSeed(password, secret, seed: u64)` — a deterministic
+> `ChaCha20Rng::seed_from_u64(seed)` seal at `KdfParams::FAST_TEST`. It was documented
+> test-only but shipped ungated in the published npm package, adjacent to `seal` on the same
+> module object the Chrome extension's offscreen vault holds. A documented prohibition is not
+> a control; see §16.6 for what replaced it. The cross-target vector it served is now proven
+> by calling `opaque::seal_with_rng` DIRECTLY from `wasm/tests/`, over a dev-only dependency
+> edge that the shipped artefact does not have.
+
+Every export (`seal`/`sealStrong`/`open`/`verifyPassword`) is a **direct, non-branching** call into
 `dig_keystore::opaque` — no wasm-specific crypto logic exists in `dig-keystore-wasm`. There
 is deliberately no `KeychainBackend`/`FileBackend`/`MemoryBackend` binding: the file and
 OS-keychain backends have no meaning in a browser, and `seal`/`open` are already
@@ -766,7 +824,8 @@ This is pinned empirically by a shared deterministic known-answer vector (fixed 
 password, secret) asserted identical in BOTH:
 
 - `tests/opaque_vectors.rs` (native, calls `opaque::seal_with_rng` directly), and
-- `wasm/tests/opaque_wasm.rs` (`wasm-bindgen-test`, calls `sealWithSeed`),
+- `wasm/tests/opaque_wasm.rs` (`wasm-bindgen-test`, also calls `opaque::seal_with_rng`
+  directly, reaching it through `dig-keystore-wasm`'s DEV-dependency edge — see §16.6),
 
 using the same concrete RNG (`rand_chacha::ChaCha20Rng`, NOT `rand::StdRng` — a different
 algorithm that would silently break the vector despite an identical numeric seed). Both
@@ -804,11 +863,40 @@ extension's vault) depends on to prove old blobs stay readable across a native/w
 | W-2 | `dig-keystore`'s own build/lints/format/dependency graph are unaffected by `dig-keystore-wasm` existing (§13.1, §13.2) |
 | W-3 | `seal`/`sealStrong`/`open`/`verifyPassword` are direct calls into `opaque::*` — no divergent wasm-only crypto path |
 | W-4 | The native↔wasm KAT vector (§16.3) matches byte-for-byte in both `tests/opaque_vectors.rs` and `wasm/tests/opaque_wasm.rs` |
-| W-5 | `sealWithSeed` is documented test/fixture-only and MUST NOT be reachable from a production seal path |
+| W-5 | No export accepts an RNG, a seed, or any caller-supplied entropy. The export set equals §16.2 exactly (`wasm/tests/shipped_surface.rs`), and a `sealWithSeed`-shaped export does not COMPILE for the shipped artefact (`cargo build -p dig-keystore-wasm --target wasm32-unknown-unknown --release` → `E0433`/`E0425`) |
 | W-6 | `sealStrong`-produced blobs round-trip through the same `open` as `seal`-produced blobs (`wasm/tests/opaque_wasm.rs::seal_strong_roundtrip`) |
+| W-7 | Two seals of identical inputs differ in BOTH the salt bytes `[21..37)` and the nonce bytes `[37..49)` — the salt/nonce source is live under wasm32 (`wasm/tests/opaque_wasm.rs::successive_seals_differ_so_the_salt_and_nonce_are_live`) |
+| W-8 | `rand_chacha` (and every other seeded-RNG crate) is a DEV-dependency only, and the normal `dig-keystore` edge does not enable `test-vectors` (`wasm/tests/shipped_surface.rs`) |
 
 Test evidence: `wasm/tests/opaque_wasm.rs` (`wasm-bindgen-test`, run via `wasm-pack test
---node`), cross-checked against `tests/opaque_vectors.rs`.
+--node`), cross-checked against `tests/opaque_vectors.rs`;
+`wasm/tests/shipped_surface.rs` (native, W-5/W-8); the release-build CI step (W-5).
+
+### 16.6 Entropy contract (normative)
+
+**The wasm binding MUST NOT let JavaScript choose any entropy.**
+
+- Every export draws its Argon2id salt and AES-GCM nonce INSIDE the module, from
+  `rand_core::OsRng` backed by `getrandom`'s `js` feature (`crypto.getRandomValues`). No
+  export takes an RNG, a seed, an IV, or a salt.
+- The direction of trust is deliberate and is the opposite of the pattern used elsewhere in
+  the ecosystem (hub.dig.net draws 32 bytes in JS and hands them to wasm): here the crate
+  owns the entropy, so a JS caller cannot weaken it by passing the wrong argument.
+
+**Enforcement.** Reintroducing a caller-seeded sealer requires undoing three independent
+things, each of which fails a build rather than a review:
+
+1. `wasm/Cargo.toml`'s normal `dig-keystore` edge does not enable `test-vectors`, so
+   `opaque::seal_with_rng` does not resolve in `wasm/src/lib.rs` (`E0425`/`E0432`).
+2. `rand_chacha` is a DEV-dependency, so `ChaCha20Rng` is not nameable there (`E0433`).
+3. `wasm/tests/shipped_surface.rs` pins the export-name set, scans the binding source for
+   seeded-RNG tokens, and asserts both manifest properties above.
+
+Cargo unifies dev-dependency features into the library ONLY when building test targets, so
+`wasm-pack test --node` sees the deterministic seam and `wasm-pack build --release` — the
+command `publish-npm.yml` runs to produce the npm tarball — does not. CI builds that exact
+release configuration as its own step, so the shipped artefact is gated on it directly rather
+than inferred from a `--all-targets` build.
 
 
 ---

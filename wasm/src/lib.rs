@@ -8,20 +8,48 @@
 //!
 //! # Surface
 //!
-//! - [`seal`] / [`open`] / [`verify_password`] — the real API. Each is a
-//!   direct, non-branching call into [`dig_keystore::opaque`] (no
-//!   wasm-specific crypto logic lives in this crate) — see that module's
+//! - [`seal`] / [`seal_strong`] / [`open`] / [`verify_password`] — the real
+//!   API. Each is a direct, non-branching call into [`dig_keystore::opaque`]
+//!   (no wasm-specific crypto logic lives in this crate) — see that module's
 //!   docs for the container format and the native↔wasm byte-compatibility
 //!   argument.
-//! - [`seal_with_seed`] — **test/fixture-only.** Seals with a caller-chosen
-//!   deterministic seed instead of OS randomness, so a shared known-answer
-//!   vector can be asserted identical on both this wasm target and native
-//!   `cargo test` (`wasm/tests/opaque_wasm.rs` / `tests/opaque_vectors.rs`).
-//!   Predictable RNG — **never use it to seal a real secret.**
 //! - [`init`] — installs the panic-hook (feature `console-panic-hook`,
 //!   default on) so a Rust panic surfaces a real message + stack trace in
 //!   the browser/Node console instead of an opaque wasm trap. Call once at
 //!   startup; safe to omit.
+//!
+//! That is the WHOLE export surface, and it is pinned by
+//! `wasm/tests/shipped_surface.rs`.
+//!
+//! # Entropy contract (normative — `SPEC.md` §16.6)
+//!
+//! Every export above draws its Argon2id salt and AES-GCM nonce inside the
+//! wasm module, from `rand_core::OsRng` backed by `getrandom`'s "js" feature
+//! (`crypto.getRandomValues`). **No export takes an RNG, a seed, or any
+//! entropy from JavaScript**, so a JS caller cannot weaken the sealing of a
+//! wallet secret by passing the wrong argument.
+//!
+//! This crate previously exported `sealWithSeed(password, secret, seed: u64)`
+//! — a 64-bit-seeded ChaCha20 at the `FAST_TEST` KDF preset — as a test
+//! fixture, one autocomplete keystroke away from [`seal`] on the same module
+//! object the extension's offscreen vault holds. It shipped in the published
+//! npm package. It is REMOVED (dig_ecosystem #2549), and three independent
+//! things now have to be undone to bring it back, each of which fails a build
+//! rather than a review:
+//!
+//! 1. `dig_keystore::opaque::seal_with_rng` is behind the non-default
+//!    `test-vectors` feature, which this crate does not enable as a normal
+//!    dependency — naming it here is `E0432`/`E0603` under
+//!    `wasm-pack build --release`.
+//! 2. `rand_chacha` is a DEV-dependency of this crate, so `ChaCha20Rng` is
+//!    not nameable in this file at all.
+//! 3. `wasm/tests/shipped_surface.rs` pins the exact exported-name set and
+//!    scans this file for seeded-RNG tokens.
+//!
+//! The known-answer vector that `sealWithSeed` existed to serve is unaffected:
+//! `wasm/tests/opaque_wasm.rs` now calls `seal_with_rng` DIRECTLY (a dev-only
+//! dependency edge), which proves the same cross-target byte identity without
+//! a pass-through in the shipped module.
 //!
 //! # Storage backend
 //!
@@ -42,8 +70,6 @@
 
 use dig_keystore::opaque;
 use dig_keystore::{KdfParams, Password};
-use rand_chacha::rand_core::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 use wasm_bindgen::prelude::*;
 
 /// Install a panic hook that forwards Rust panics to the JS console with a
@@ -98,28 +124,4 @@ pub fn verify_password(password: &str, blob: &[u8]) -> bool {
 pub fn seal_strong(password: &str, secret: &[u8]) -> Result<Vec<u8>, JsValue> {
     opaque::seal(&Password::from(password), secret, KdfParams::STRONG)
         .map_err(|e| JsValue::from_str(&e.to_string()))
-}
-
-/// **Test/fixture-only.** Seals `secret` under `password` using a
-/// deterministic RNG seeded from `seed`, so the exact output bytes are
-/// reproducible. Used exclusively to prove `wasm/tests/opaque_wasm.rs`'s
-/// known-answer vector matches `tests/opaque_vectors.rs`'s native vector
-/// byte-for-byte (dig_ecosystem #147 Phase A native↔wasm compatibility
-/// proof).
-///
-/// # ⚠️ Never use this for a real secret
-///
-/// A seeded RNG is trivially predictable — a caller who knows (or can guess)
-/// `seed` can derive the exact salt/nonce used, defeating the encryption.
-/// Production callers MUST use [`seal`] (OS randomness) instead.
-#[wasm_bindgen(js_name = "sealWithSeed")]
-pub fn seal_with_seed(password: &str, secret: &[u8], seed: u64) -> Result<Vec<u8>, JsValue> {
-    let mut rng = ChaCha20Rng::seed_from_u64(seed);
-    opaque::seal_with_rng(
-        &Password::from(password),
-        secret,
-        KdfParams::FAST_TEST,
-        &mut rng,
-    )
-    .map_err(|e| JsValue::from_str(&e.to_string()))
 }

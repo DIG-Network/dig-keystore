@@ -1,6 +1,6 @@
 [package]
 name = "dig-keystore-wasm"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
 publish = false
@@ -17,14 +17,16 @@ default = ["console-panic-hook"]
 console-panic-hook = ["dep:console_error_panic_hook"]
 
 [dependencies]
+# NOTE the absence of `features = ["test-vectors"]`. That is load-bearing:
+# without it `dig_keystore::opaque::seal_with_rng` — the only sealing entry
+# point whose salt/nonce a caller controls — does not resolve in `src/lib.rs`,
+# so a `sealWithSeed`-style export cannot be reintroduced into the SHIPPED
+# cdylib without also editing this line. `wasm-pack build --release` does not
+# unify dev-dependency features, so the release artefact is built in exactly
+# this configuration. dig_ecosystem #2549.
 dig-keystore = { path = ".." }
 wasm-bindgen = "0.2"
 console_error_panic_hook = { version = "0.1", optional = true }
-# `rand_chacha` is already in dig-keystore's own dependency graph (used by its
-# scheme tests); reused here (as a REGULAR dependency, not dev-only) so the
-# `sealWithSeed` test-fixture export below can build for a normal wasm-bindgen
-# test binary, which only sees this crate's own [dependencies]/[dev-dependencies].
-rand_chacha = "0.3"
 
 # `getrandom`'s "js" backend is what makes `rand_core::OsRng` (used internally by
 # `dig_keystore::opaque::seal`) work under wasm32-unknown-unknown — without it,
@@ -35,6 +37,19 @@ getrandom = { version = "0.2", features = ["js"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
+# TEST-ONLY, both of them, and that is the security property:
+#
+# * `test-vectors` turns on `opaque::seal_with_rng`, and `rand_chacha` supplies
+#   the seeded ChaCha20 to drive it. Together they let
+#   `tests/opaque_wasm.rs` assert the native↔wasm known-answer vector.
+# * Cargo unifies dev-dependency features into the lib ONLY when building test
+#   targets. A plain `cargo build` / `wasm-pack build --release` — the command
+#   that produces the published npm artefact — sees neither, so the
+#   deterministic seam is absent from the shipped module by construction.
+#
+# Moving either of these up into `[dependencies]` re-opens dig_ecosystem #2549.
+dig-keystore = { path = "..", features = ["test-vectors"] }
+rand_chacha = "0.3"
 
 [package.metadata.cargo-machete]
 ignored = ["getrandom"]

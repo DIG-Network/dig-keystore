@@ -857,9 +857,39 @@ use dig_keystore::testing::{MemoryBackend, TEST_PASSWORD};
 |---|---|---|
 | `file-backend` | **on** | Ships [`FileBackend`] |
 | `testing` | off | Ships [`testing`](#testing-module-feature-testing) module |
+| `test-vectors` | off | Ships `opaque::seal_with_rng` — the only entry point whose RNG (and therefore salt and nonce) the caller supplies. For the native↔wasm known-answer vector ONLY. **Never enable it in a production build**; see [Entropy contract](#entropy-contract) |
 | `password-strength` | off | Enables [`Password::strength`] via `zxcvbn` |
 | `eip2335` | off | *(planned)* import/export [EIP-2335](https://eips.ethereum.org/EIPS/eip-2335) v4 JSON |
 | `chia-keychain` | off | *(planned)* import Chia `.keychain` files |
+
+---
+
+## Entropy contract
+
+**Every salt, nonce and generated secret in this crate comes from the operating system's
+CSPRNG** (`rand_core::OsRng` → `getrandom(2)` / `BCryptGenRandom` /
+`crypto.getRandomValues`). Salts are 128-bit, AES-GCM nonces 96-bit, and generated key-scheme
+secrets 256-bit; a fresh salt AND a fresh nonce are drawn on every `seal`, `change_password`
+and `rotate_kdf`.
+
+**No entry point on the default surface accepts an RNG, a seed, or any caller-supplied
+entropy.** `opaque::seal` hard-wires `OsRng`; the RNG-parameterised body is crate-private.
+
+This is enforced by reachability, not by convention, because a predictable salt or seed is
+invisible to testing — the output of a weak generator cannot be distinguished from a strong
+one by inspecting the bytes. Milk Sad (CVE-2023-31290), Trust Wallet (CVE-2022-32969) and
+Profanity all shipped passing test suites. Three layers hold it:
+
+1. `opaque::seal_with_rng` exists only under the non-default `test-vectors` feature — naming
+   it from a default build is `E0432`, proven by `scripts/surface-check.sh`.
+2. `rand_chacha` is a dev-dependency, so a *seeded* CSPRNG is not nameable in `src/` at all.
+3. `R: RngCore + CryptoRng` makes a non-cryptographic generator (`SmallRng`) `E0277`. Note
+   this bound is the WEAKEST of the three: `ChaCha20Rng::seed_from_u64(n)` satisfies
+   `CryptoRng` on 64 bits. A bound can constrain the algorithm, never the seed.
+
+The wasm binding (`dig-keystore-wasm`) carries the same contract one level up: no export takes
+entropy from JavaScript, and `wasm/tests/shipped_surface.rs` pins the export set. Full
+normative text: `SPEC.md` §15.5 and §16.6.
 
 ---
 

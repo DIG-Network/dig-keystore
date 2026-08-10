@@ -8,14 +8,33 @@
 //!
 //! `KAT_SEED`/`KAT_PASSWORD`/`KAT_SECRET`/`KAT_HEX` below MUST match
 //! `dig-keystore`'s `tests/opaque_vectors.rs` (and `src/opaque.rs`'s inline
-//! unit test) exactly. Both suites call the identical `seal_with_rng` (via
-//! `sealWithSeed` here, which is a direct pass-through) with the identical
-//! `ChaCha20Rng` seed and assert the identical expected hex. Agreement here
-//! is the empirical proof that a blob sealed on one target is byte-for-byte
-//! identical to one sealed on the other — required before Phase B (the
-//! extension vault migration) can trust the format across its native-CLI and
-//! in-browser-wasm consumers alike.
+//! unit test) exactly. Both suites call the identical `seal_with_rng` with the
+//! identical `ChaCha20Rng` seed and assert the identical expected hex.
+//! Agreement here is the empirical proof that a blob sealed on one target is
+//! byte-for-byte identical to one sealed on the other — required before Phase
+//! B (the extension vault migration) can trust the format across its
+//! native-CLI and in-browser-wasm consumers alike.
+//!
+//! # Why this calls the library, not an export (dig_ecosystem #2549)
+//!
+//! It used to go through `dig_keystore_wasm::seal_with_seed`, a
+//! `#[wasm_bindgen]` export whose only reason to exist was this assertion.
+//! That put a 64-bit-seeded, `FAST_TEST`-KDF sealing function into the
+//! published npm package, adjacent to the real `seal` on the same module
+//! object the extension's wallet vault holds.
+//!
+//! The test needs the deterministic SEAM, not a deterministic EXPORT. A
+//! `wasm-bindgen-test` binary links this crate's dev-dependencies, so it can
+//! reach `dig_keystore::opaque::seal_with_rng` directly under the
+//! `test-vectors` feature — while `wasm-pack build --release`, which does not
+//! unify dev-dependency features, cannot. The proof is strictly stronger for
+//! it: there is no pass-through wrapper left between the assertion and the
+//! code production runs.
 
+use dig_keystore::opaque::seal_with_rng;
+use dig_keystore::{KdfParams, Password};
+use rand_chacha::rand_core::SeedableRng;
+use rand_chacha::ChaCha20Rng;
 use wasm_bindgen_test::*;
 
 // No `wasm_bindgen_test_configure!` call — the default runner is Node
@@ -39,9 +58,9 @@ fn from_hex(s: &str) -> Vec<u8> {
         .collect()
 }
 
-/// **Proves:** `sealWithSeed(KAT_PASSWORD, KAT_SECRET, KAT_SEED)` compiled
-/// for `wasm32-unknown-unknown` produces the EXACT SAME bytes as
-/// `dig_keystore::opaque::seal_with_rng` compiled natively
+/// **Proves:** `dig_keystore::opaque::seal_with_rng` compiled for
+/// `wasm32-unknown-unknown` produces the EXACT SAME bytes as the identical
+/// call compiled natively
 /// (`tests/opaque_vectors.rs::kat_vector_stable_via_public_api`).
 ///
 /// **Why it matters:** This is the wasm half of the native↔wasm
@@ -56,13 +75,57 @@ fn from_hex(s: &str) -> Vec<u8> {
 /// target could never see.
 #[wasm_bindgen_test]
 fn kat_vector_matches_native() {
-    let blob = dig_keystore_wasm::seal_with_seed(KAT_PASSWORD, KAT_SECRET, KAT_SEED)
-        .expect("seal_with_seed should succeed");
+    let mut rng = ChaCha20Rng::seed_from_u64(KAT_SEED);
+    let blob = seal_with_rng(
+        &Password::from(KAT_PASSWORD),
+        KAT_SECRET,
+        KdfParams::FAST_TEST,
+        &mut rng,
+    )
+    .expect("seal_with_rng should succeed");
     assert_eq!(
         to_hex(&blob),
         KAT_HEX,
         "wasm KAT vector diverged from native"
     );
+}
+
+/// **Proves:** a blob sealed by the SHIPPED `seal` export opens under the
+/// shipped `open`, and — the part that matters here — that two successive
+/// seals of the SAME secret under the SAME password produce DIFFERENT bytes.
+///
+/// **Why it matters:** identical output would mean the salt and nonce are not
+/// varying, i.e. the module is not drawing from `crypto.getRandomValues` at
+/// all (a stuck, constant, or seeded source). That is the only symptom of the
+/// weak-entropy defect class that is observable from OUTPUT rather than from
+/// reading the source, so it is worth pinning on the real wasm target where
+/// the `getrandom` "js" backend is actually exercised.
+///
+/// **Catches:** a `getrandom` backend regression that silently returns a
+/// constant buffer under wasm32 instead of failing; a future refactor that
+/// hoists the salt/nonce out of the per-call path.
+///
+/// **Does NOT catch:** a *predictable but varying* source. Distinguishing
+/// ChaCha-from-a-known-seed from ChaCha-from-the-OS is not possible by
+/// inspecting output; that property is held structurally by the
+/// `test-vectors` gate and by `tests/shipped_surface.rs`.
+#[wasm_bindgen_test]
+fn successive_seals_differ_so_the_salt_and_nonce_are_live() {
+    let secret = b"\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10";
+    let a = dig_keystore_wasm::seal("same-password", secret).expect("seal a");
+    let b = dig_keystore_wasm::seal("same-password", secret).expect("seal b");
+    assert_ne!(
+        to_hex(&a),
+        to_hex(&b),
+        "two seals of identical inputs produced identical bytes — the salt/nonce source is not live"
+    );
+
+    // The 53-byte header carries the salt at [21..37) and the nonce at
+    // [37..49) (SPEC.md §3). Assert BOTH varied, not merely that the blobs
+    // differ somewhere: a nonce that varied while the salt was stuck would
+    // still change the ciphertext and pass a whole-blob comparison.
+    assert_ne!(&a[21..37], &b[21..37], "Argon2id salt did not vary");
+    assert_ne!(&a[37..49], &b[37..49], "AES-GCM nonce did not vary");
 }
 
 /// **Proves:** the native-produced KAT blob (hardcoded `KAT_HEX`, pinned

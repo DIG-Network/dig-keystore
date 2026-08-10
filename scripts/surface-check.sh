@@ -61,9 +61,9 @@ trap 'rm -rf "$WORK"' EXIT
 
 failures=0
 
-# run_case <name> <expect: build|fail> <error-code|-> <features-toml-list> <body>
+# run_case <name> <expect: build|fail> <error-code|-> <features-toml-list> <body> [extra-deps-toml]
 run_case() {
-    local name="$1" expect="$2" code="$3" features="$4" body="$5"
+    local name="$1" expect="$2" code="$3" features="$4" body="$5" extra_deps="${6:-}"
     local dir="$WORK/probe"
     rm -rf "$dir"
     mkdir -p "$dir/src"
@@ -78,6 +78,7 @@ edition = "2021"
 
 [dependencies]
 dig-keystore = { path = "$REPO_ROOT", default-features = false, features = [$features] }
+$extra_deps
 TOML
     printf '%s\n' "$body" >"$dir/src/main.rs"
 
@@ -151,6 +152,56 @@ fn main() {
     let _ = take;
 }'
 
+# ---------------------------------------------------------------------------
+# Entropy-source gate (dig_ecosystem #2549)
+#
+# `opaque::seal` hard-wires the OS CSPRNG. `opaque::seal_with_rng` lets the
+# CALLER supply the RNG, and therefore the Argon2id salt and the AES-GCM nonce
+# — the Milk Sad / Trust Wallet defect class (CVE-2023-31290, CVE-2022-32969),
+# which no test over the OUTPUT can detect because a seeded-ChaCha20 blob is
+# indistinguishable from a sound one.
+#
+# So the defence has to be reachability, and reachability is what these cases
+# prove: a consumer on the default surface cannot NAME the RNG-parameterised
+# seam. Same one-symbol-per-probe + matched-control discipline as the custody
+# cases above.
+#
+# The bound case is a SECOND, weaker line and is labelled honestly. `R: RngCore
+# + CryptoRng` makes `SmallRng` a type error, which is worth pinning because it
+# is the shape the rest of the ecosystem copies — but it does NOT reject
+# `ChaCha20Rng::seed_from_u64(n)`, which satisfies `CryptoRng` on 64 bits of
+# entropy. Seed PROVENANCE is not expressible in the type system. The feature
+# gate is what protects production; the bound is what stops an outright
+# non-cryptographic generator.
+# ---------------------------------------------------------------------------
+
+NAMES_SEAL_WITH_RNG='use dig_keystore::opaque::seal_with_rng;
+fn main() {}'
+
+NAMES_SEAL='use dig_keystore::opaque::seal;
+fn main() {}'
+
+RAND_DEP='rand = { version = "0.8", features = ["small_rng"] }
+rand_core = "0.6"'
+
+# Non-CSPRNG at the seam: must be rejected by `R: RngCore + CryptoRng` (E0277,
+# unsatisfied trait bound) — NOT by name resolution, which is why the feature
+# is enabled here.
+SMALL_RNG_BODY='use dig_keystore::{KdfParams, Password};
+use rand::rngs::SmallRng;
+use rand::SeedableRng;
+fn main() {
+    let mut rng = SmallRng::seed_from_u64(1);
+    let _ = dig_keystore::opaque::seal_with_rng(&Password::from("pw"), b"s", KdfParams::default(), &mut rng);
+}'
+
+# The matched control: identical call shape, CSPRNG source. Without it, a typo
+# in the probe above would look exactly like the bound doing its job.
+OS_RNG_BODY='use dig_keystore::{KdfParams, Password};
+fn main() {
+    let _ = dig_keystore::opaque::seal_with_rng(&Password::from("pw"), b"s", KdfParams::default(), &mut rand_core::OsRng);
+}'
+
 echo "dig-keystore public-surface check (repo: $REPO_ROOT)"
 echo
 
@@ -165,6 +216,21 @@ done
 run_case "custody control: sign() builds" build - '"file-backend", "custody"' "$SIGNS_BODY"
 run_case "custody alone cannot call expose_secret" fail E0599 '"file-backend", "custody"' "$EXPOSES_BODY"
 run_case "hd-derivation can call expose_secret" build - '"file-backend", "custody", "hd-derivation"' "$EXPOSES_BODY"
+
+echo
+echo "-- entropy-source gate (dig_ecosystem #2549) --"
+
+run_case "entropy control: default surface can name opaque::seal" \
+    build - '"file-backend"' "$NAMES_SEAL"
+run_case "default surface CANNOT name opaque::seal_with_rng" \
+    fail E0432 '"file-backend"' "$NAMES_SEAL_WITH_RNG"
+run_case "test-vectors CAN name opaque::seal_with_rng" \
+    build - '"file-backend", "test-vectors"' "$NAMES_SEAL_WITH_RNG"
+
+run_case "entropy control: OsRng satisfies the seam's RNG bound" \
+    build - '"file-backend", "test-vectors"' "$OS_RNG_BODY" "$RAND_DEP"
+run_case "non-CryptoRng (SmallRng) is rejected at the seam" \
+    fail E0277 '"file-backend", "test-vectors"' "$SMALL_RNG_BODY" "$RAND_DEP"
 
 echo
 if [ "$failures" -ne 0 ]; then

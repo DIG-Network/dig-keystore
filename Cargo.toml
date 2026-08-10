@@ -1,6 +1,6 @@
 [package]
 name = "dig-keystore"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 description = "Encrypted secret-key storage for DIG Network binaries (BLS signing + L1 wallet keys). AES-256-GCM + Argon2id, typed per-scheme magic files, zeroizing memory hygiene."
 license = "Apache-2.0 OR MIT"
@@ -63,9 +63,16 @@ aes-gcm = "0.10"
 argon2 = "0.5"
 zeroize = { version = "1.7", features = ["derive"] }
 
-# RNG
+# RNG. `rand_core` ONLY — it supplies `OsRng` (the operating-system CSPRNG
+# every salt/nonce in this crate is drawn from) and the `RngCore + CryptoRng`
+# bounds.
+#
+# `rand_chacha` is deliberately a DEV-dependency (below), never a regular one.
+# It is the crate that can build a *seeded* CSPRNG, and it is used only by test
+# code. Keeping it out of `[dependencies]` means `ChaCha20Rng::seed_from_u64`
+# is not nameable anywhere in `src/` production code — a compile error, not a
+# review catch. dig_ecosystem #2549.
 rand_core = "0.6"
-rand_chacha = "0.3"
 
 # Utilities
 crc32fast = "1"
@@ -94,6 +101,9 @@ keyring = { version = "3", default-features = false, features = [
 proptest = "1"
 tempfile = "3"
 rand = "0.8"
+# Seeded ChaCha20, for the deterministic known-answer vectors ONLY. See the
+# `[dependencies]` note above for why this must never move up there.
+rand_chacha = "0.3"
 # Only used by the `L1WalletBls` golden cross-derivation test (regression for
 # dig_ecosystem #64/#57) to independently reproduce the Chia-standard
 # `mnemonic -> mnemonic.to_seed("") -> SecretKey::from_seed(seed)` chain that
@@ -138,6 +148,21 @@ password-strength = ["dep:zxcvbn"]
 # Exposes MemoryBackend + TEST_PASSWORD helpers for use in dependent crates' tests.
 testing = []
 
+# Exposes `opaque::seal_with_rng`, whose RNG — and therefore whose Argon2id salt
+# and AES-GCM nonce — is chosen by the CALLER.
+#
+# DELIBERATELY NOT IN `default`, and not implied by `testing`. It exists for one
+# purpose: pinning the native↔wasm known-answer vector (`tests/opaque_vectors.rs`,
+# `wasm/tests/opaque_wasm.rs`), where determinism IS the property under test.
+#
+# The gate is a security boundary, not tidiness. A predictable salt/nonce is the
+# Milk Sad / Trust Wallet defect class (CVE-2023-31290, CVE-2022-32969): the
+# resulting blob is indistinguishable from a sound one by inspection or by any
+# test, so the only durable defence is that the weak path cannot be NAMED from a
+# production build. `scripts/surface-check.sh` proves that by compiling a
+# default-features consumer that names it and asserting E0432. dig_ecosystem #2549.
+test-vectors = []
+
 # Import/export in Ethereum keystore v4 JSON format (EIP-2335).
 # Not implemented in v0.1; trait stubs exist.
 eip2335 = []
@@ -149,6 +174,14 @@ chia-keychain = []
 [lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
+
+[[test]]
+# The KAT suite calls `opaque::seal_with_rng`, which only exists under
+# `test-vectors` — the gate that keeps a caller-chosen RNG out of every
+# production build (dig_ecosystem #2549).
+name = "opaque_vectors"
+path = "tests/opaque_vectors.rs"
+required-features = ["test-vectors"]
 
 [[test]]
 name = "roundtrip"
