@@ -843,17 +843,21 @@ extension's vault) depends on to prove old blobs stay readable across a native/w
 - `.github/workflows/publish-npm.yml` builds + publishes on a `v*` tag push, a published
   GitHub Release, or manual dispatch, authenticating via npm Trusted Publishing (OIDC) — no
   `NPM_TOKEN` secret is used.
-- **Known gap (dig_ecosystem #70-adjacent):** npm's trusted-publisher config can only be
-  attached to a package that already exists on the registry, so the FIRST publish of this
-  brand-new scoped name 404s even with OIDC correctly wired (confirmed: the `v0.2.1`
+- **The first-publish bootstrap is DONE — this section previously said otherwise.** npm's
+  trusted-publisher config can only be attached to a package that already exists, so the very
+  first publish of the scoped name 404'd even with OIDC correctly wired (the `v0.2.1`
   `publish-npm` run authenticated fine and still got `404 Not Found - PUT
-  .../@dignetwork%2fdig-keystore-wasm`) — an org-admin bootstrap (one manual authenticated
-  `npm publish` to create the package) is needed before OIDC publishing can take over. This
-  does NOT block consuming `dig-keystore-wasm`: it is buildable and usable as a git/path
-  dependency (`wasm-pack build` locally, or vendoring the built `wasm/pkg` output into a
-  consuming repo as a local/`file:` dependency) in the interim, the same stopgap
-  `@dignetwork/chia-provider` and `@dignetwork/chip35-dl-coin-wasm` use. The dig-chrome-extension
-  (dig_ecosystem #147 Phase B) vendors the built `pkg/` output this way.
+  .../@dignetwork%2fdig-keystore-wasm`). That org-admin bootstrap has since happened:
+  `npm view @dignetwork/dig-keystore-wasm versions` returns `["0.2.0","0.2.1","0.2.2"]`
+  (verified 2026-08-09), so OIDC publishing is live and a consumer MAY depend on a normal
+  semver range.
+- **Published versions are immutable, so 0.2.0–0.2.2 permanently carry the removed
+  `sealWithSeed` export (§16.2).** They cannot be repaired in place; the remediation is to
+  roll forward to ≥ 0.3.0. Consumers that vendor the built `pkg/` output rather than
+  installing from the registry — the dig-chrome-extension does, at
+  `third_party/dig-keystore-wasm/` (dig_ecosystem #147 Phase B) — MUST re-vendor from a
+  ≥ 0.3.0 build; a stale vendored copy keeps the export regardless of what the registry
+  serves.
 
 ### 16.5 Conformance
 
