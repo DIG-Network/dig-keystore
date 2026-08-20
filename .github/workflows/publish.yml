@@ -191,16 +191,19 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GH_ACCESS_TOKEN }}
         with:
           tag_name: ${{ github.ref }}
-          release_name: "dig-constants v${{ steps.extract_version.outputs.VERSION }}"
+          release_name: "dig-keystore v${{ steps.extract_version.outputs.VERSION }}"
           body: |
-            ## dig-constants v${{ steps.extract_version.outputs.VERSION }}
+            ## dig-keystore v${{ steps.extract_version.outputs.VERSION }}
 
-            DIG network constants — genesis challenge, consensus parameters, and network configuration.
+            Encrypted secret-key storage for DIG Network binaries (BLS signing + L1 wallet keys):
+            typed per-scheme magic files, AES-256-GCM + Argon2id, zeroizing memory hygiene and
+            filesystem-atomic writes. The single audit surface for where validator and wallet
+            keys live.
 
             ### Installation
             ```toml
             [dependencies]
-            dig-constants = "${{ steps.extract_version.outputs.VERSION }}"
+            dig-keystore = "${{ steps.extract_version.outputs.VERSION }}"
             ```
           draft: false
           prerelease: false
