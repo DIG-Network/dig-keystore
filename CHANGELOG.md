@@ -7,6 +7,12 @@ This project adheres to [Semantic Versioning](https://semver.org) and
 Behaviour changes that need action on upgrade are recorded in
 [docs/UPGRADING.md](docs/UPGRADING.md).
 
+
+## [0.9.0] - 2026-08-21
+
+### Features
+- **file-backend:** Enforce the owner-only at-rest floor and CI the platform-gated code (#14)
+
 ## [0.8.1] - 2026-08-20
 
 ### Bug Fixes
