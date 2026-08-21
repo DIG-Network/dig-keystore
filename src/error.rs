@@ -283,6 +283,51 @@ pub enum KeystoreError {
         /// The hardware class recorded in the blob.
         found: &'static str,
     },
+
+    /// A path holding sealed key material is readable or writable by someone
+    /// other than its owner, and the backend could not restrict it.
+    ///
+    /// `FileBackend` requests owner-only permissions on its root directory and
+    /// on every blob it writes, then **verifies** the result rather than
+    /// trusting the request (`SPEC.md` §10.3, conformance C-14). This error is
+    /// what that verification returns when the bits are still permissive — for
+    /// example on a filesystem that does not implement POSIX modes, where
+    /// `chmod` reports success and changes nothing.
+    ///
+    /// It is deliberately fatal rather than a warning. The alternative is a
+    /// `write` that reports success while leaving a keystore blob group- or
+    /// world-readable, which makes the backend's own documented guarantee a
+    /// falsehood. Callers that genuinely accept that exposure should choose a
+    /// different root, not a quieter backend.
+    #[error("{path} has mode {mode:04o}, which grants access beyond its owner; choose a keystore root on a filesystem that honours POSIX modes")]
+    InsecurePermissions {
+        /// The offending path.
+        path: String,
+        /// The permission bits actually observed after the request.
+        mode: u32,
+    },
+
+    /// The keystore root is not a directory the backend is willing to own.
+    ///
+    /// `FileBackend` refuses a root that is a **symbolic link**, or that
+    /// exists as a non-directory, rather than following it. This is the one
+    /// case that is deliberately *not* repaired: a permissive mode is a drift
+    /// the backend can correct in one syscall and then verify, but a symlink
+    /// is a statement about *where the keystore lives*, and the backend has no
+    /// basis for deciding that some other directory is the intended one. Both
+    /// `fs::set_permissions` and `fs::metadata` follow links, so following one
+    /// would mean chmodding a directory chosen by whoever planted the link and
+    /// then sealing an account master seed inside it.
+    ///
+    /// Callers that genuinely want the link's target as their root should pass
+    /// the resolved path, making that choice explicit at the call site.
+    #[error("{path} is not usable as a keystore root: {reason}")]
+    UnsafeRoot {
+        /// The offending path, exactly as configured.
+        path: String,
+        /// Why the path cannot hold a keystore.
+        reason: &'static str,
+    },
 }
 
 impl From<std::io::Error> for KeystoreError {

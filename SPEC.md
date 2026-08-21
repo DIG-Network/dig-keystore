@@ -420,8 +420,34 @@ Implementations MUST satisfy:
 - Maps `BackendKey` → `<root>/<key>.dks` (`.dks` = "DIG KeyStore").
 - **Lazy root creation:** `FileBackend::new(root)` has no side effects; the root
   directory (and parents) is created on the first `write`, with mode `0700` on Unix.
-- **Atomic write procedure (normative):** write to a sibling
-  `<key>.dks.tmp.<random16hex>` (mode `0600` on Unix) → `fsync` the file → `rename`
+- **Owner-only enforcement (normative, Unix):** after requesting `0700` on the root
+  or `0600` on a blob, the backend MUST re-read the resulting mode and MUST fail with
+  `InsecurePermissions` if any group or other bit (`0o077`) remains set. Verifying the
+  outcome rather than the `chmod` return value is required because a filesystem
+  without POSIX mode support reports a successful `chmod` and changes nothing. The
+  check on a blob MUST happen before any ciphertext is written, and a failure MUST
+  leave no blob behind. The root check MUST run on **every** `write`, not only on the
+  call that creates the root: a root created by an earlier version that requested
+  `0700` without verifying it is exactly the one at risk, and it already exists by the
+  time any later write reaches it. Where the mode is repairable — on the root or on
+  a blob, both of which go through the same request-then-verify step — the backend
+  MUST restore the owner-only mode and proceed, reserving `InsecurePermissions` for a
+  path whose mode cannot be corrected. Repair is sound only because the mode is
+  re-read afterwards; a backend that repairs without verifying has the pre-0.9.0
+  defect this clause exists to close.
+- **Root identity (normative):** the backend MUST inspect the root with a
+  link-preserving stat (`lstat`) and MUST fail with `UnsafeRoot` if the configured
+  root is a symbolic link, or exists as anything other than a directory. It MUST NOT
+  resolve the link and adopt its target. Unlike a permissive mode, this is not
+  repaired: a mode is a property of the intended directory that the backend can
+  correct and then confirm, whereas a symlink asserts *which* directory the keystore
+  is, and adopting it would mean applying the owner-only mode to — and sealing key
+  material into — a directory chosen by whoever created the link, since `chmod(2)` and
+  `stat(2)` both follow links. A caller that wants the target as its root MUST pass
+  the resolved path.
+- **Atomic write procedure (normative):** create the sibling
+  `<key>.dks.tmp.<random16hex>` with mode `0600` requested in the `open(2)` call
+  itself on Unix, so the tmp file never exists under the umask-derived mode → `fsync` the file → `rename`
   onto the final name → on Unix, `fsync` the containing directory. On rename failure
   the tmp file is best-effort unlinked. The tmp-name random suffix is
   non-cryptographic (time × golden-ratio-prime + pid) and exists only to disambiguate
@@ -436,7 +462,10 @@ Implementations MUST satisfy:
 - **Exists:** cheap `stat`-based override.
 - Windows: `std::fs::rename` (`MoveFileExW` + `MOVEFILE_REPLACE_EXISTING`) provides
   old-or-new (never torn) semantics; Unix file permissions do not apply and NTFS ACL
-  inheritance governs access.
+  inheritance governs access. The crate does NOT narrow that inheritance: an explicit
+  owner-only DACL requires Win32 FFI, which C-15 (`unsafe_code = "forbid"`) excludes
+  from this package. Windows owner-only enforcement is therefore out of scope here and
+  belongs in a separate workspace member alongside the hardware providers.
 
 ### 10.4 `MemoryBackend` (always available)
 
@@ -534,7 +563,7 @@ Error `Display` strings MUST NOT contain secret material.
 | No secret leakage via `Debug`/logs | Custom redacting `Debug` on `Password` and `SignerHandle`; errors carry no secrets | Design invariant |
 | Secret containment | No `AsRef`/`Deref`/`into_raw` on `SignerHandle`; `expose_secret` is the single named, borrow-only escape hatch | Design invariant |
 | Crash-safe persistence | tmp + fsync + atomic rename (+ Unix dir fsync) in `FileBackend` | OS-level |
-| File-system access control | Unix mode `0700` dir / `0600` files | Unix only |
+| File-system access control | Unix mode `0700` dir / `0600` files, verified after the request | Unix only; Windows inherits the parent ACL |
 | Memory safety | `unsafe_code = "forbid"` crate-wide | Compiler-enforced |
 
 **Non-guarantees (explicit).**
@@ -625,8 +654,11 @@ generated glue code is not `forbid(unsafe_code)`-clean — see §16.1.
 | C-12 | `Password`: arbitrary bytes verbatim, zeroizing, redacting `Debug` | §9 |
 | C-13 | Backend contract: `NotFound` error shape, atomic write, idempotent delete, strict-prefix list | §10.2 |
 | C-14 | `FileBackend`: `<root>/<key>.dks`, lazy 0700 root, 0600 tmp+fsync+rename writes, best-effort zero-wipe delete | §10.3 |
+| C-14a | `FileBackend`: owner-only mode is verified after the request; a residual group/other bit fails the write with `InsecurePermissions` before any ciphertext is written (Unix) | §10.3 |
 | C-15 | No `unsafe` code anywhere in the crate | §13.2 |
+| C-14b | `FileBackend`: a symlinked or non-directory root is refused with `UnsafeRoot` and neither chmodded nor written into; a repairable mode is restored and verified instead of refused | §10.3 |
 | C-16 | CI gates: `cargo fmt --check`, `clippy -D warnings`, full test suite under `cargo llvm-cov --all-features --fail-under-lines 80` | repo `.github/workflows/publish.yml` |
+| C-16a | CI gates the target-gated code on its own platforms: `clippy -D warnings` and the full test suite on `windows-latest` and `macos-latest`, so `OsKeychainBackend` and any future platform provider are compiled and exercised rather than only declared | repo `.github/workflows/publish.yml` (`platform` job) |
 
 ### 14.3 Test evidence
 

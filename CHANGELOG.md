@@ -4,6 +4,9 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+Behaviour changes that need action on upgrade are recorded in
+[docs/UPGRADING.md](docs/UPGRADING.md).
+
 ## [0.8.1] - 2026-08-20
 
 ### Bug Fixes
