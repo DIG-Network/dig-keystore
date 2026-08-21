@@ -283,6 +283,29 @@ pub enum KeystoreError {
         /// The hardware class recorded in the blob.
         found: &'static str,
     },
+
+    /// A path holding sealed key material is readable or writable by someone
+    /// other than its owner, and the backend could not restrict it.
+    ///
+    /// `FileBackend` requests owner-only permissions on its root directory and
+    /// on every blob it writes, then **verifies** the result rather than
+    /// trusting the request (`SPEC.md` §10.3, conformance C-14). This error is
+    /// what that verification returns when the bits are still permissive — for
+    /// example on a filesystem that does not implement POSIX modes, where
+    /// `chmod` reports success and changes nothing.
+    ///
+    /// It is deliberately fatal rather than a warning. The alternative is a
+    /// `write` that reports success while leaving a keystore blob group- or
+    /// world-readable, which makes the backend's own documented guarantee a
+    /// falsehood. Callers that genuinely accept that exposure should choose a
+    /// different root, not a quieter backend.
+    #[error("{path} has mode {mode:04o}, which grants access beyond its owner")]
+    InsecurePermissions {
+        /// The offending path.
+        path: String,
+        /// The permission bits actually observed after the request.
+        mode: u32,
+    },
 }
 
 impl From<std::io::Error> for KeystoreError {

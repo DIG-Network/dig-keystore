@@ -21,11 +21,27 @@
 //!
 //! # Permissions
 //!
-//! On Unix, both the keystore root directory (on creation) and every written
-//! file are set to mode `0700` / `0600` respectively — readable only by the
-//! owning user. On Windows, standard NTFS ACL inheritance applies; operators
-//! running under a shared user account should not rely on this crate for
-//! access control.
+//! On Unix, the keystore root directory (on creation) and every written file
+//! are restricted to mode `0700` / `0600` — reachable only by the owning user
+//! — and that restriction is **verified after the fact**, not merely
+//! requested. A path that is still group- or other-accessible fails the write
+//! with [`KeystoreError::InsecurePermissions`] rather than succeeding quietly,
+//! because a `chmod` on a filesystem without POSIX modes reports success and
+//! changes nothing. See [`is_owner_only`].
+//!
+//! **On Windows there is no equivalent floor.** Standard NTFS ACL inheritance
+//! applies and this crate does not narrow it, so a blob inherits whatever its
+//! parent directory grants. Restricting it would mean an explicit owner-only
+//! DACL, which requires Win32 FFI, and this package pins `unsafe_code =
+//! "forbid"` as a spec property (`SPEC.md` §12/§13.2, conformance C-15) — so
+//! that enforcement cannot live here. It belongs beside the platform hardware
+//! providers in a separate workspace member (dig_ecosystem #1693). Until then,
+//! operators on a shared user account should not rely on this crate for access
+//! control on Windows.
+//!
+//! Either way this is defence in depth. The blob is already sealed with
+//! AES-256-GCM under an Argon2id-hardened key (`SPEC.md` §3–§5); permissions
+//! decide who may *attempt* an offline attack on it, not whether one succeeds.
 //!
 //! # Secure delete
 //!
@@ -50,6 +66,58 @@ use crate::error::{KeystoreError, Result};
 
 /// File extension for keystore blobs. Stands for "DIG KeyStore".
 const EXT: &str = "dks";
+
+/// Every group and other permission bit — the set that must be clear on any
+/// path holding sealed key material.
+const GROUP_AND_OTHER_BITS: u32 = 0o077;
+
+/// Whether `mode` grants access to nobody but the owner.
+///
+/// This is the property the backend actually promises. It is deliberately
+/// phrased over the *observed* bits rather than over "did `chmod` return
+/// `Ok`", because the two are not the same thing: on a filesystem with no
+/// POSIX mode support a `chmod` succeeds and changes nothing, so a successful
+/// call is no evidence at all that the file is protected.
+///
+/// Only the low nine permission bits are considered; file-type and setuid
+/// bits carried in the same word are irrelevant to who may read the blob.
+///
+/// Compiled on every platform even though only Unix calls it, so that its
+/// behaviour is testable on any build host. A `#[cfg(unix)]` predicate is
+/// unfalsifiable on a Windows developer machine, which is where most of this
+/// crate's consumers are written.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn is_owner_only(mode: u32) -> bool {
+    mode & GROUP_AND_OTHER_BITS == 0
+}
+
+/// Request owner-only permissions on `path`, then verify they took effect.
+///
+/// `requested` is the mode to ask for (`0o700` for the root directory,
+/// `0o600` for a blob). The request's own error is intentionally ignored: it
+/// is the verification below, not the call's return value, that decides
+/// whether the path is safe to hold key material.
+///
+/// On non-Unix hosts this is a no-op — see the module docs for what does and
+/// does not protect a blob on Windows.
+#[allow(unused_variables)]
+fn enforce_owner_only(path: &Path, requested: u32) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(requested));
+
+        let mode = fs::metadata(path)?.permissions().mode() & 0o777;
+        if !is_owner_only(mode) {
+            return Err(KeystoreError::InsecurePermissions {
+                path: path.display().to_string(),
+                mode,
+            });
+        }
+    }
+    Ok(())
+}
 
 /// Filesystem-backed keychain.
 ///
@@ -109,22 +177,31 @@ impl FileBackend {
         p
     }
 
-    /// Create the root directory if it does not already exist.
+    /// Create the root directory if it does not already exist, and hold it to
+    /// the owner-only floor whether or not this call created it.
     ///
     /// Called from `write` to support the "lazy directory creation" behaviour.
-    /// On Unix, sets the directory to mode `0700` so only the owning user can
-    /// list / enter it.
+    /// On Unix the directory is restricted to mode `0700` — so only the owning
+    /// user can list or enter it — and that is verified, not assumed.
+    ///
+    /// **The check runs on every write, not only on the creation path.** An
+    /// earlier shape returned early when the root already existed, which left
+    /// the floor unreachable for exactly the roots that need it most: one
+    /// created by a version that requested `0700` without checking the result,
+    /// on a filesystem where that request does nothing, stays unverified
+    /// forever.
+    ///
+    /// The exposure that closes is the root's **write** bits rather than its
+    /// read bits — blobs carry their own verified `0600`, so a permissive root
+    /// does not expose sealed bytes, but group- or world-writable grants
+    /// `unlink` and `create` inside it. That is blob substitution (rolling a
+    /// victim back to an older sealed seed) and deletion, on the directory
+    /// holding an account master seed.
     fn ensure_root(&self) -> Result<()> {
-        if self.root.exists() {
-            return Ok(());
+        if !self.root.exists() {
+            fs::create_dir_all(&self.root)?;
         }
-        fs::create_dir_all(&self.root)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&self.root, fs::Permissions::from_mode(0o700));
-        }
-        Ok(())
+        enforce_owner_only(&self.root, 0o700)
     }
 }
 
@@ -145,7 +222,11 @@ impl KeychainBackend for FileBackend {
     ///
     /// Steps:
     /// 1. Ensure `root` exists.
-    /// 2. Create sibling `<key>.dks.tmp.<random>` file, mode `0600` on Unix.
+    /// 2. Create sibling `<key>.dks.tmp.<random>` file and restrict it to mode
+    ///    `0600` on Unix, verifying the result before any bytes are written —
+    ///    so a root that cannot hold key material safely yields
+    ///    [`KeystoreError::InsecurePermissions`] and an empty, removed tmp
+    ///    file rather than an exposed blob.
     /// 3. Write `data`, `fsync` the file handle.
     /// 4. `rename` the tmp file onto the final name.
     /// 5. On Unix, `fsync` the containing directory so the rename is durable.
@@ -161,18 +242,30 @@ impl KeychainBackend for FileBackend {
         let rand_suffix: u64 = fastrand_suffix();
         tmp_path.set_extension(format!("{EXT}.tmp.{rand_suffix:016x}"));
 
-        {
+        // Stage the bytes into the tmp file. Written as a closure so the file
+        // handle is dropped by leaving scope — and so EVERY failure in here,
+        // not just a rename failure, gets the same cleanup below. An earlier
+        // shape orphaned the tmp file whenever `write_all` or `sync_all`
+        // failed.
+        let staged = (|| -> Result<()> {
             let mut f = fs::File::create(&tmp_path)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = f.set_permissions(fs::Permissions::from_mode(0o600));
-            }
+            // Restrict the file BEFORE any ciphertext reaches it. A keystore
+            // that cannot protect its own blobs must write nothing at all,
+            // rather than report success over a world-readable seed.
+            enforce_owner_only(&tmp_path, 0o600)?;
             f.write_all(data)?;
             // fsync the file so the bytes hit durable storage before rename.
             // Without this, a crash between write() and rename() would leave
             // a zero-length tmp file and no keystore data at all.
             f.sync_all()?;
+            Ok(())
+        })();
+
+        if let Err(e) = staged {
+            // The handle is already closed, so this also succeeds on Windows,
+            // where an open file cannot be unlinked.
+            let _ = fs::remove_file(&tmp_path);
+            return Err(e);
         }
 
         // Atomic rename. On POSIX this is truly atomic within a filesystem;
@@ -450,5 +543,122 @@ mod tests {
         assert!(!sub.exists());
         be.write(&BackendKey::new("k"), b"x").unwrap();
         assert!(sub.exists());
+    }
+
+    /// `is_owner_only` accepts exactly those modes that grant nobody but the
+    /// owner any access.
+    ///
+    /// **Why it matters:** this predicate is the whole of the permission
+    /// guarantee. Everything else in `enforce_owner_only` is plumbing around
+    /// its answer, so a predicate that is merely *nearly* right silently
+    /// downgrades the at-rest floor for dig-app's account seed and dig-node's
+    /// seed store, which are this backend's production callers.
+    ///
+    /// **Catches:** each of the plausible near-miss implementations. `0o400`
+    /// and `0o000` rule out an equality test against `0o600`; `0o640` rules
+    /// out a predicate that only inspects the *other* triad (and any
+    /// `mode & 0o077 != 0o077` inversion, which would read group-readable as
+    /// safe); `0o604` rules out one that only inspects the *group* triad.
+    #[test]
+    fn owner_only_predicate_rejects_every_non_owner_bit() {
+        // No access for group or other, at varying owner permissions.
+        for mode in [0o000, 0o400, 0o600, 0o700] {
+            assert!(
+                is_owner_only(mode),
+                "{mode:04o} grants nobody but the owner"
+            );
+        }
+
+        // A single group or other bit is enough to fail, in either triad.
+        for mode in [0o640, 0o604, 0o644, 0o060, 0o006, 0o660, 0o777] {
+            assert!(!is_owner_only(mode), "{mode:04o} reaches beyond the owner");
+        }
+    }
+
+    /// A written blob, and the root that holds it, really are owner-only on
+    /// disk — not merely requested to be.
+    ///
+    /// **Why it matters:** `SPEC.md` §10.3 / conformance C-14 state mode
+    /// `0700` for the root and `0600` for blobs as a normative property. It
+    /// was previously requested with the result discarded, so nothing
+    /// observed whether it held.
+    ///
+    /// **Catches:** a regression that drops the `enforce_owner_only` call
+    /// from either `ensure_root` or `write`, or that reorders the blob's
+    /// restriction after `write_all` so ciphertext lands at the umask default
+    /// first.
+    ///
+    /// Unix-only because Windows has no POSIX mode. That makes it
+    /// unfalsifiable on a Windows build host, which is why the predicate above
+    /// is tested separately and unconditionally.
+    #[cfg(unix)]
+    #[test]
+    fn written_blob_and_root_are_owner_only_on_disk() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("keys");
+        let be = FileBackend::new(root.clone());
+        be.write(&BackendKey::new("seed"), b"sealed").unwrap();
+
+        let root_mode = fs::metadata(&root).unwrap().permissions().mode() & 0o777;
+        assert_eq!(root_mode, 0o700, "root dir mode");
+
+        let blob_mode = fs::metadata(root.join("seed.dks"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(blob_mode, 0o600, "blob mode");
+    }
+
+    /// An **already-existing** permissive root is brought back to `0700` on the
+    /// next write, not left alone.
+    ///
+    /// **Why it matters:** the floor is worthless if it only applies to roots
+    /// this version created. A root created by 0.8.x — which requested `0700`
+    /// and discarded the result — is precisely the one at risk, and it exists
+    /// before any 0.9.0 write reaches it. The exposure is the root's *write*
+    /// bits: blobs carry their own verified `0600`, but a group- or
+    /// world-writable root grants `unlink` and `create`, which is blob
+    /// substitution (rolling a victim back to an older sealed seed) and
+    /// deletion, on the directory holding an account master seed.
+    ///
+    /// **Catches:** the `if self.root.exists() { return Ok(()); }` early
+    /// return. Under it this test sees `0o755` and fails, because
+    /// `enforce_owner_only` never runs on the existing-root path.
+    /// `written_blob_and_root_are_owner_only_on_disk` above cannot catch it:
+    /// its root is a fresh non-existent path, so it only ever exercises the
+    /// creation branch.
+    ///
+    /// **Why this asserts tightening rather than `InsecurePermissions`:** on a
+    /// root the process owns, `chmod` succeeds, so the permissive mode is
+    /// repaired and there is nothing to refuse. Erroring instead would fail a
+    /// host the crate can simply fix. `InsecurePermissions` stays reserved for
+    /// the unrepairable case — a filesystem where the `chmod` does nothing —
+    /// which is the branch documented as unreachable in a test.
+    #[cfg(unix)]
+    #[test]
+    fn existing_permissive_root_is_tightened_on_write() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("keys");
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o755,
+            "fixture must start group/other-accessible, or it proves nothing"
+        );
+
+        let be = FileBackend::new(root.clone());
+        be.write(&BackendKey::new("seed"), b"sealed").unwrap();
+
+        assert_eq!(
+            fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o700,
+            "an existing root must be brought to the floor, not skipped"
+        );
     }
 }
