@@ -299,12 +299,34 @@ pub enum KeystoreError {
     /// world-readable, which makes the backend's own documented guarantee a
     /// falsehood. Callers that genuinely accept that exposure should choose a
     /// different root, not a quieter backend.
-    #[error("{path} has mode {mode:04o}, which grants access beyond its owner")]
+    #[error("{path} has mode {mode:04o}, which grants access beyond its owner; choose a keystore root on a filesystem that honours POSIX modes")]
     InsecurePermissions {
         /// The offending path.
         path: String,
         /// The permission bits actually observed after the request.
         mode: u32,
+    },
+
+    /// The keystore root is not a directory the backend is willing to own.
+    ///
+    /// `FileBackend` refuses a root that is a **symbolic link**, or that
+    /// exists as a non-directory, rather than following it. This is the one
+    /// case that is deliberately *not* repaired: a permissive mode is a drift
+    /// the backend can correct in one syscall and then verify, but a symlink
+    /// is a statement about *where the keystore lives*, and the backend has no
+    /// basis for deciding that some other directory is the intended one. Both
+    /// `fs::set_permissions` and `fs::metadata` follow links, so following one
+    /// would mean chmodding a directory chosen by whoever planted the link and
+    /// then sealing an account master seed inside it.
+    ///
+    /// Callers that genuinely want the link's target as their root should pass
+    /// the resolved path, making that choice explicit at the call site.
+    #[error("{path} is not usable as a keystore root: {reason}")]
+    UnsafeRoot {
+        /// The offending path, exactly as configured.
+        path: String,
+        /// Why the path cannot hold a keystore.
+        reason: &'static str,
     },
 }
 

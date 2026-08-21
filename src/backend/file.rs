@@ -58,7 +58,7 @@
 //! - [DJB on secure-delete on SSDs](https://cr.yp.to/bib/2009/coker.pdf)
 
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use crate::backend::{BackendKey, KeychainBackend};
@@ -117,6 +117,30 @@ fn enforce_owner_only(path: &Path, requested: u32) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Create `path` for writing, born owner-only where the platform allows it.
+///
+/// `File::create` opens with `0666 & ~umask`, so on a default umask the tmp
+/// blob exists at `0644` for the window between the open and the narrowing
+/// `chmod`. Requesting the mode in the `open(2)` call itself removes that
+/// window: the file never exists under a permissive mode at all. `create_new`
+/// additionally refuses to follow a symlink planted on the tmp path.
+///
+/// One window is *not* closed by this, and is not closable from user space: a
+/// process holding a directory fd opened before the root was tightened can
+/// still `openat` inside it, and read permission granted at open time survives
+/// any later `chmod`. That is why the root is brought to a verified `0700`
+/// before any tmp file is created, rather than relying on the blob mode alone.
+fn create_owner_only(path: &Path) -> Result<fs::File> {
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    Ok(opts.open(path)?)
 }
 
 /// Filesystem-backed keychain.
@@ -197,11 +221,41 @@ impl FileBackend {
     /// `unlink` and `create` inside it. That is blob substitution (rolling a
     /// victim back to an older sealed seed) and deletion, on the directory
     /// holding an account master seed.
+    ///
+    /// **A permissive mode is repaired; a symlinked root is refused.** The two
+    /// resolve in opposite directions because they are different kinds of
+    /// claim. A mode is a property of the intended directory: the backend can
+    /// correct it in one syscall and then *verify* that it did, so refusing
+    /// instead would turn any drift — a restore from backup, a `chmod` by the
+    /// user — into a permanent brick on master-seed writes, and hand anyone who
+    /// can merely widen the mode a denial primitive over a condition the crate
+    /// can fix. A symlink is a claim about *which directory the keystore is*,
+    /// and no syscall makes an attacker-chosen directory into the intended one;
+    /// since `set_permissions` and `metadata` both follow links, "repairing" it
+    /// would mean chmodding that directory to `0700` and sealing the seed
+    /// inside it. Fail closed where the invariant cannot be established, repair
+    /// where it can be established and confirmed.
     fn ensure_root(&self) -> Result<()> {
-        if !self.root.exists() {
-            fs::create_dir_all(&self.root)?;
+        // `symlink_metadata` inspects the root itself; `exists()` and
+        // `metadata()` both follow links, and so do `set_permissions` and the
+        // verification read below. Following a link here would mean chmodding
+        // and then seeding a directory chosen by whoever planted it.
+        match fs::symlink_metadata(&self.root) {
+            Ok(meta) if meta.file_type().is_symlink() => Err(KeystoreError::UnsafeRoot {
+                path: self.root.display().to_string(),
+                reason: "it is a symbolic link; pass the resolved target if that is intended",
+            }),
+            Ok(meta) if !meta.is_dir() => Err(KeystoreError::UnsafeRoot {
+                path: self.root.display().to_string(),
+                reason: "it exists and is not a directory",
+            }),
+            Ok(_) => enforce_owner_only(&self.root, 0o700),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir_all(&self.root)?;
+                enforce_owner_only(&self.root, 0o700)
+            }
+            Err(e) => Err(KeystoreError::from(e)),
         }
-        enforce_owner_only(&self.root, 0o700)
     }
 }
 
@@ -221,9 +275,11 @@ impl KeychainBackend for FileBackend {
     /// Atomically write `data` to `<root>/<key>.dks`.
     ///
     /// Steps:
-    /// 1. Ensure `root` exists.
-    /// 2. Create sibling `<key>.dks.tmp.<random>` file and restrict it to mode
-    ///    `0600` on Unix, verifying the result before any bytes are written —
+    /// 1. Ensure `root` exists, is a directory rather than a symlink, and is
+    ///    verified owner-only.
+    /// 2. Create sibling `<key>.dks.tmp.<random>` file with mode `0600`
+    ///    requested in the `open(2)` call on Unix, then verify the mode that
+    ///    actually took effect before any bytes are written —
     ///    so a root that cannot hold key material safely yields
     ///    [`KeystoreError::InsecurePermissions`] and an empty, removed tmp
     ///    file rather than an exposed blob.
@@ -248,7 +304,7 @@ impl KeychainBackend for FileBackend {
         // shape orphaned the tmp file whenever `write_all` or `sync_all`
         // failed.
         let staged = (|| -> Result<()> {
-            let mut f = fs::File::create(&tmp_path)?;
+            let mut f = create_owner_only(&tmp_path)?;
             // Restrict the file BEFORE any ciphertext reaches it. A keystore
             // that cannot protect its own blobs must write nothing at all,
             // rather than report success over a world-readable seed.
@@ -635,8 +691,13 @@ mod tests {
     /// root the process owns, `chmod` succeeds, so the permissive mode is
     /// repaired and there is nothing to refuse. Erroring instead would fail a
     /// host the crate can simply fix. `InsecurePermissions` stays reserved for
-    /// the unrepairable case — a filesystem where the `chmod` does nothing —
-    /// which is the branch documented as unreachable in a test.
+    /// the unrepairable case — a filesystem where the `chmod` does nothing, a
+    /// foreign-owned root where it returns `EPERM`, an immutable attribute.
+    /// The *production call sites* therefore cannot reach the refusal on a
+    /// mode-honouring filesystem the process owns; the refusal itself is not
+    /// unreachable, and
+    /// `enforce_owner_only_refuses_a_mode_it_could_not_bring_to_the_floor`
+    /// drives it directly.
     #[cfg(unix)]
     #[test]
     fn existing_permissive_root_is_tightened_on_write() {
@@ -659,6 +720,120 @@ mod tests {
             fs::metadata(&root).unwrap().permissions().mode() & 0o777,
             0o700,
             "an existing root must be brought to the floor, not skipped"
+        );
+    }
+
+    /// The verify half of chmod-then-verify actually refuses.
+    ///
+    /// **Property:** when the mode observed after the request is *not*
+    /// owner-only, `enforce_owner_only` returns `InsecurePermissions` carrying
+    /// the bits it saw — it does not return `Ok` on the strength of the
+    /// `chmod` having succeeded.
+    ///
+    /// **Why this is the load-bearing assertion of the whole change:** the
+    /// thesis of 0.9.0 is "verify the outcome, do not trust the request". The
+    /// request's own `Result` is discarded on purpose in `enforce_owner_only`;
+    /// the refusal below is the entire reason that is safe. Without this test
+    /// the fail-closed block can be deleted with a green suite, returning the
+    /// crate to the 0.8.x shape — `set_permissions` called and its result
+    /// thrown away with nothing observing the bits.
+    ///
+    /// **Fixture design.** The refusal cannot be provoked through `write`,
+    /// whose call sites always request an owner-only mode on a path the
+    /// process owns, so a `write`-level fixture would need a mode-ignoring
+    /// mount or a second uid — neither available in a test, which is what
+    /// previously left this branch untested. The requested mode is a
+    /// *parameter*, so asking for a permissive one drives the same verified
+    /// read the production path performs, hermetically: no root, no second
+    /// uid, no exotic mount. `0o755` is used rather than `0o777` because it
+    /// leaves the owner triad at its production value, so the assertion is
+    /// about the group and other bits and nothing else.
+    ///
+    /// **Catches:** deletion of the fail-closed block in `enforce_owner_only`,
+    /// and any narrowing of `is_owner_only` reached through it. Asserting the
+    /// observed `mode` — not merely that the call erred — also rules out a
+    /// refusal that reports the mode it *asked* for instead of the one on
+    /// disk, which would make the diagnostic useless on exactly the mount
+    /// classes it exists to diagnose.
+    #[cfg(unix)]
+    #[test]
+    fn enforce_owner_only_refuses_a_mode_it_could_not_bring_to_the_floor() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("permissive");
+        fs::create_dir_all(&root).unwrap();
+
+        let err = enforce_owner_only(&root, 0o755)
+            .expect_err("a mode granting group and other access must be refused, not accepted");
+
+        match err {
+            KeystoreError::InsecurePermissions { path, mode } => {
+                assert_eq!(mode, 0o755, "the reported mode must be the one on disk");
+                assert_eq!(path, root.display().to_string(), "reported path");
+            }
+            other => panic!("expected InsecurePermissions, got {other:?}"),
+        }
+
+        // The refusal describes the state it found, so the mode really is the
+        // permissive one — the fixture is not silently owner-only already.
+        assert_eq!(
+            fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o755,
+            "fixture must remain group/other-accessible, or it proves nothing"
+        );
+    }
+
+    /// A symlinked root is refused, not followed.
+    ///
+    /// **Property:** `write` on a root that is a symbolic link returns
+    /// `UnsafeRoot` and touches neither the target's mode nor its contents.
+    ///
+    /// **Why refuse here when a permissive mode is repaired:** a mode is a
+    /// property of the intended directory that the backend can correct and
+    /// then verify. A symlink is a claim about *which* directory the keystore
+    /// is, and no syscall makes an attacker-chosen directory into the intended
+    /// one. Both `set_permissions` and `metadata` follow links, so the
+    /// alternative is chmodding a directory of someone else's choosing to
+    /// `0700` and sealing an account master seed inside it.
+    ///
+    /// **Catches:** reverting `symlink_metadata` to `exists()`/`metadata()`.
+    ///
+    /// **The side effects are asserted before the error, deliberately.** Under
+    /// that revert the write returns `Ok`, so an `expect_err` placed first
+    /// panics and the two assertions that name the actual damage never run —
+    /// the proof would fire on "no error" rather than on the primitive. Ordered
+    /// this way, the failure a reverting change sees is the chmod reaching
+    /// through the link, which is what is new in this diff. The error
+    /// assertion still has to be there: a write that failed for some later,
+    /// unrelated reason would leave the victim equally untouched.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_root_is_refused_and_its_target_is_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let victim = dir.path().join("victim");
+        fs::create_dir_all(&victim).unwrap();
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let root = dir.path().join("keys");
+        std::os::unix::fs::symlink(&victim, &root).unwrap();
+
+        let result = FileBackend::new(root.clone()).write(&BackendKey::new("seed"), b"sealed");
+
+        assert_eq!(
+            fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+            0o755,
+            "the link's target must not be chmodded through the link"
+        );
+        assert!(
+            !victim.join("seed.dks").exists(),
+            "the sealed blob must not land in the link's target"
+        );
+        assert!(
+            matches!(result, Err(KeystoreError::UnsafeRoot { .. })),
+            "a symlinked root must be refused, got {result:?}"
         );
     }
 }

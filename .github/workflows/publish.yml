@@ -180,12 +180,19 @@ jobs:
   publish:
     name: Publish to crates.io
     runs-on: ubuntu-latest
-    needs: [test, wasm]
-    # `test`/`wasm` are skipped (not failed) on a tag push by design (see their `if:`
-    # above) — a tagged commit already passed those gates on its PR/main-branch push.
+    needs: [test, platform, wasm]
+    # `test`/`platform`/`wasm` are skipped (not failed) on a tag push by design (see
+    # their `if:` above) — a tagged commit already passed those gates on its
+    # PR/main-branch push, so each is tolerated as `skipped` as well as `success`.
+    #
+    # `platform` is in this list because it is the only job that compiles the
+    # target-gated `OsKeychainBackend`; leaving it out let a `workflow_dispatch`
+    # publish proceed over a RED platform job, which is the same blind spot that hid
+    # that backend from CI for five releases.
     if: |
       always() &&
       (needs.test.result == 'success' || needs.test.result == 'skipped') &&
+      (needs.platform.result == 'success' || needs.platform.result == 'skipped') &&
       (needs.wasm.result == 'success' || needs.wasm.result == 'skipped') &&
       (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
     steps:
