@@ -38,13 +38,19 @@ const BLS_SIGNING_KAT_PUBKEY_HEX: &str =
 /// password `"kat-password"`, and [`KdfParams::FAST_TEST`] always produces
 /// the same derived public key.
 ///
-/// **Why it matters:** This is the crate's load-bearing
-/// derivation-stability test. The first time this test runs, it prints the
-/// generated pubkey and returns success (regeneration flow). Thereafter
-/// any change to the seed-generation path, Argon2id, AES-256-GCM, the file
-/// format, or the chia-bls `from_seed` derivation will produce a different
-/// pubkey and fail the test — forcing the maintainer to confirm the change
-/// is intentional before accepting it.
+/// **Why it matters:** This is the crate's load-bearing derivation-stability
+/// test. Any change to the seed-generation path, Argon2id, AES-256-GCM, the
+/// file format, or the `chia-bls` `from_seed` derivation produces a different
+/// pubkey and fails here — forcing a maintainer to confirm the change is
+/// intentional before accepting it.
+///
+/// **It must compare unconditionally.** This test formerly opened with a
+/// "regeneration flow": when the constant still held a placeholder it printed
+/// the generated value and `return`ed *success*. Nobody ever pasted the value
+/// in, so for nine releases the crate's derivation gate compared nothing and
+/// passed for any output. Do not reintroduce a first-run branch; if the
+/// expected value is genuinely unknown, obtain it from a run and commit it —
+/// a gate that can skip itself is not a gate.
 ///
 /// **Catches:** accidental version bumps in `chia-bls` that change
 /// EIP-2333 derivation, reorderings in the file-format encoder that change

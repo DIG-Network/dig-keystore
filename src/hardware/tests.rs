@@ -1773,3 +1773,109 @@ fn a_failed_bind_restores_a_legacy_blob_through_the_os_keychain_backend() {
         "the legacy, openable bytes are restored — never left as an unopenable envelope"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The refusal errors do NOT identify which situation occurred (SPEC.md §17.5b).
+// ---------------------------------------------------------------------------
+
+/// **Proves:** a blob presented to a *foreign* device and the same blob
+/// presented to its *own* device after that device's key was destroyed produce
+/// the **same** error, `HardwareUnwrapFailed` — while a different hardware
+/// class and a host with no provider produce two *distinguishable* errors.
+///
+/// **Why it matters:** those two situations have opposite consequences. A
+/// foreign device is a refusal and the blob is still openable by going back to
+/// the machine that sealed it; a destroyed key is permanent loss, and for a
+/// wallet seed that is funds loss. Because the envelope records a hardware
+/// *class* and carries no device identity (§17.3), nothing in the bytes tells
+/// them apart — so a surface that reads `HardwareUnwrapFailed` as "just move
+/// the file back to your other machine" shows a reassuring message in exactly
+/// the case where the money is gone. `SPEC.md` §17.5b forbids that inference,
+/// and this test is what makes the prohibition non-vacuous (C-35).
+///
+/// **Catches:** a future change that gives the cleared-device path its own
+/// error variant, which would silently make §17.5b's prohibition obsolete
+/// while leaving the warning text in the spec.
+///
+/// The two controls are load-bearing. An implementation that collapsed
+/// *everything* to `HardwareUnwrapFailed` would satisfy the equality above
+/// while destroying the distinctions C-24 requires, so the class mismatch and
+/// the no-provider host are asserted to remain distinct (C-34). Without them
+/// this test would pass for a strictly worse implementation.
+#[test]
+fn a_foreign_device_and_a_cleared_device_are_indistinguishable_from_the_error() {
+    let kind = HardwareKind::WindowsTpm20;
+    let inner = Arc::new(MemoryBackend::default());
+    let key = BackendKey::new("identity");
+    let blob = v1_shaped_blob(0x5A);
+
+    let sealing_device = FakeDevice::working(kind, 0xA1);
+    let machine_a = HardwareBoundBackend::with_inner(
+        inner.clone(),
+        Some(Arc::new(sealing_device.clone())),
+        HardwarePolicy::Required,
+    )
+    .unwrap();
+    machine_a.write(&key, &blob).unwrap();
+
+    // Honest control: before anything is disturbed, the sealing machine opens
+    // it. Without this a failure below could mean "nothing works".
+    assert_eq!(machine_a.read(&key).unwrap(), blob);
+
+    // Situation 1 — RECOVERABLE. A different device of the same class: the
+    // copied-blob case. The sealing device still exists and still holds the key.
+    let foreign_device = HardwareBoundBackend::with_inner(
+        inner.clone(),
+        Some(Arc::new(FakeDevice::working(kind, 0xB2))),
+        HardwarePolicy::Required,
+    )
+    .unwrap();
+    let foreign_err = foreign_device
+        .read(&key)
+        .expect_err("a foreign device must not open this blob");
+
+    // Situation 2 — PERMANENT. The original device, its key destroyed, which is
+    // what a TPM clear or a mainboard swap does. Nothing can open the blob now.
+    sealing_device.rotate_device_key(0x99);
+    let cleared_err = machine_a
+        .read(&key)
+        .expect_err("a cleared device cannot open its own envelope");
+
+    assert!(
+        matches!(foreign_err, KeystoreError::HardwareUnwrapFailed { .. })
+            && matches!(cleared_err, KeystoreError::HardwareUnwrapFailed { .. }),
+        "SPEC.md §17.5b depends on these being the SAME error; got foreign \
+         {foreign_err:?} and cleared {cleared_err:?}"
+    );
+
+    // Control A — a different hardware CLASS is still distinguishable, because
+    // the class (unlike the device) is recorded in the envelope.
+    let other_class = HardwareBoundBackend::with_inner(
+        inner.clone(),
+        Some(Arc::new(FakeDevice::working(
+            HardwareKind::MacSecureEnclave,
+            0xA1,
+        ))),
+        HardwarePolicy::Required,
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            other_class.read(&key),
+            Err(KeystoreError::HardwareKindMismatch { .. })
+        ),
+        "a different hardware class must stay distinguishable (C-34)"
+    );
+
+    // Control B — a host with no provider reports that, not an unwrap failure.
+    // This is the ordinary shape of an exfiltrated blob on an attacker's box.
+    let no_provider =
+        HardwareBoundBackend::with_inner(inner.clone(), None, HardwarePolicy::Preferred).unwrap();
+    assert!(
+        matches!(
+            no_provider.read(&key),
+            Err(KeystoreError::NotHardwareBound { .. })
+        ),
+        "a host with no provider must report NotHardwareBound (C-34)"
+    );
+}
