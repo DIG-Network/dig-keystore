@@ -198,9 +198,17 @@ is added.
 The uplift needed no source change at all — `SecretKey::{from_seed, from_bytes,
 to_bytes}`, `PublicKey`, `Signature`, `sign` and `verify` are shape-identical
 across the two lines. The whole risk was invisible: if EIP-2333 derivation had
-moved, every `DIGVK1`/`DIGLW1` keystore already at rest would have silently
-started opening onto a *different* identity. Nothing in the crate would have
-failed; the keys would just have been the wrong ones.
+moved, every `DIGVK1` keystore already at rest would have silently started
+opening onto a *different* identity. Nothing in the crate would have failed;
+the keys would just have been the wrong ones.
+
+Only `DIGVK1` is exposed, and the reason is worth keeping: `BlsSigning` derives
+through `SecretKey::from_seed`, which *is* EIP-2333, while `L1WalletBls`
+reconstructs through `SecretKey::from_bytes`
+(`src/custody/scheme/l1_wallet_bls.rs:81-98`) because its stored secret is
+already a derived master key. A derivation change cannot reach a scheme that
+does not derive. So the KAT that needed blessing was the one on the exposed
+scheme — which is also the one that had never been blessed.
 
 The crate had a test for exactly this — `tests/vectors.rs`
 `bls_signing_deterministic_pubkey`, whose own doc comment says it catches
