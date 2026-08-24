@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use dig_keystore::{
     backend::{BackendKey, KeychainBackend, MemoryBackend},
-    scheme::{BlsSigning, L1WalletBls},
+    scheme::{BlsSigning, KeyScheme, L1WalletBls},
     KdfParams, Keystore, Password,
 };
 use rand::rngs::StdRng;
@@ -20,14 +20,19 @@ fn kat_params() -> KdfParams {
     KdfParams::FAST_TEST
 }
 
-/// Seed 0xDEADBEEF + BlsSigning → deterministic public key.
+/// Seed 0xDEADBEEF + `BlsSigning` -> deterministic public key.
 ///
-/// To regenerate this expected value (after an intentional derivation change):
-/// ```ignore
-/// let bytes = hex::encode(pk.to_bytes());
-/// println!("{}", bytes);
-/// ```
-const BLS_SIGNING_KAT_PUBKEY_HEX: &str = "_REGENERATE_ME_ON_FIRST_RUN";
+/// Blessed on `chia-bls` 0.26.0, the line this crate shipped on through v0.9.0,
+/// and re-verified unchanged on 0.36.1. That equality across the two lines is
+/// what makes the dependency uplift safe to ship: an EIP-2333 derivation change
+/// would have moved this value, and every `DIGVK1` key already at rest would
+/// have started opening onto a different identity.
+///
+/// **Never regenerate this to make a red build green.** A changed value means
+/// stored keys no longer derive the identity they were created with, which is a
+/// custody break, not a test that needs updating.
+const BLS_SIGNING_KAT_PUBKEY_HEX: &str =
+    "84775315f4005177c319d6c6769b3c212db960584bc739fe6bba9b836d1ca54b310f319376ef7462f1d03684bfa686cd";
 
 /// **Proves:** creating a `BlsSigning` keystore with RNG seed `0xDEADBEEF`,
 /// password `"kat-password"`, and [`KdfParams::FAST_TEST`] always produces
@@ -64,17 +69,6 @@ fn bls_signing_deterministic_pubkey() {
         .unwrap()
         .public_key();
     let got = hex::encode(pk.to_bytes());
-
-    // First run: print the expected value, fail, ask maintainer to paste it in.
-    if BLS_SIGNING_KAT_PUBKEY_HEX == "_REGENERATE_ME_ON_FIRST_RUN" {
-        eprintln!(
-            "BLS_SIGNING_KAT_PUBKEY_HEX = \"{}\";\n\
-             (paste into `tests/vectors.rs` and re-run)",
-            got
-        );
-        // Do not fail on first run; this is the regeneration flow.
-        return;
-    }
 
     assert_eq!(
         got, BLS_SIGNING_KAT_PUBKEY_HEX,
@@ -152,32 +146,40 @@ fn file_layout_header_size_stable() {
     assert_eq!(bytes.len(), 53 + 48 + 4);
 }
 
-/// **Proves:** the scheme magic bytes exactly match `b"DIGVK1"` and
-/// `b"DIGLW1"` — printable ASCII that operators can read when debugging.
+/// **Proves:** the magic bytes each scheme actually writes are exactly
+/// `b"DIGVK1"` and `b"DIGLW1"`, read from the production
+/// [`KeyScheme::MAGIC`] constants.
 ///
-/// **Why it matters:** Magic bytes are part of the on-disk specification.
-/// They must stay stable across library versions so an operator can
-/// `xxd <file>.dks | head -1` and immediately see which scheme's key this
-/// is. Changing them would make every old keystore unrecognisable and
-/// break field-level forensics.
+/// **Why it matters:** magic bytes are part of the on-disk specification. They
+/// must stay stable across library versions so an operator can
+/// `xxd <file>.dks | head -1` and see which scheme's key this is. Changing one
+/// makes every keystore written by an earlier version unrecognisable (SPEC.md
+/// §5.1, backwards compatibility).
 ///
-/// **Catches:** a typo during magic-constant edits (e.g., `DIGVK2`
-/// slipped in); a copy-paste that accidentally makes both schemes share
-/// the same magic; a regression to non-printable bytes.
+/// **Catches:** a typo during a magic-constant edit (`DIGVK2`), a copy-paste
+/// that makes both schemes share one magic, a regression to non-printable
+/// bytes.
+///
+/// Reading `KeyScheme::MAGIC` is the load-bearing part. This test previously
+/// declared its own private `Magic` trait holding the literals and asserted
+/// those against themselves, so it passed for any production value — including
+/// none at all. An assertion whose two sides come from the same place proves
+/// only that `==` works.
 #[test]
 fn magic_bytes_are_ascii() {
-    // Protocol-level invariant: magic bytes are human-readable for support.
-    assert_eq!(&BlsSigning::MAGIC_BYTES, b"DIGVK1");
-    assert_eq!(&L1WalletBls::MAGIC_BYTES, b"DIGLW1");
-}
+    assert_eq!(&<BlsSigning as KeyScheme>::MAGIC, b"DIGVK1");
+    assert_eq!(&<L1WalletBls as KeyScheme>::MAGIC, b"DIGLW1");
 
-// Helpers to expose the MAGIC constant for assertion without the trait import.
-trait Magic {
-    const MAGIC_BYTES: [u8; 6];
-}
-impl Magic for BlsSigning {
-    const MAGIC_BYTES: [u8; 6] = *b"DIGVK1";
-}
-impl Magic for L1WalletBls {
-    const MAGIC_BYTES: [u8; 6] = *b"DIGLW1";
+    // Printable ASCII is the property an operator relies on when reading a
+    // hex dump, so assert it rather than trusting the literals above to stay
+    // printable through a future edit.
+    for magic in [
+        <BlsSigning as KeyScheme>::MAGIC,
+        <L1WalletBls as KeyScheme>::MAGIC,
+    ] {
+        assert!(
+            magic.iter().all(|b| b.is_ascii_graphic()),
+            "magic bytes must stay printable ASCII, got {magic:?}"
+        );
+    }
 }
