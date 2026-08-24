@@ -984,7 +984,7 @@ providers MUST be implemented outside it and injected through the `HardwareProvi
 They are planned for a `hardware/` workspace member that will mirror the `wasm/` split
 (§16), tracked as dig_ecosystem #1693.
 
-**No provider ships as of 0.5.0.** This section specifies the contract a provider MUST
+**No provider ships in any release to date.** This section specifies the contract a provider MUST
 satisfy; it does not describe shipped code. A caller that supplies none resolves
 `Software(NotRequested)`: honest, and explicitly not a claim of hardware protection.
 
@@ -1020,6 +1020,40 @@ properties:
   that provokes a destructive follow-on action: a user unbinds in order to retire the
   trusted component, and "unbound" over a still-bound blob is what makes that retirement
   lose the key.
+
+### 17.5b What happens when the hardware goes away (normative)
+
+Three situations look alike to a caller and are NOT the same event. An implementation MUST
+be able to tell them apart, and a user-facing surface MUST NOT describe one as another.
+
+| Situation | Outcome | Is this a defect? |
+|---|---|---|
+| **The blob is copied to another machine** (a disk is moved, an image is cloned, a backup is exfiltrated) while the sealing hardware still exists | `HardwareUnwrapFailed`. The correct passphrase does not open it. | **No — this is the property being bought.** It is the whole reason the tier exists. |
+| **The TPM is reset** (firmware update, BIOS/UEFI reset, mainboard swap, `Clear-Tpm`) | The wrapping key is gone. The blob is **permanently unopenable**, by anyone, including its owner. | **Yes, if no `unbind` was taken first** — this is data loss, and for a wallet seed it is FUNDS loss. |
+| **The machine is replaced or the device is lost** (hardware failure, theft, decommission) | Identical to a TPM reset: the wrapping key never left the old device, so it cannot be moved to the new one. | **Yes, if no `unbind` was taken first.** |
+
+The distinction that matters: the first row is a refusal, the other two are a destruction.
+A refusal is reversible by returning to the original machine. A destruction is not
+reversible by anything.
+
+Therefore:
+
+- **There is NO recovery after the hardware is gone (MUST be stated to the user).** No
+  passphrase, no support path, and no action by this crate recovers a wrapped blob whose
+  wrapping key no longer exists. An implementation MUST NOT imply otherwise.
+- **The only escape hatch is taken IN ADVANCE**, while the hardware still answers: either
+  [`unbind`](§17.5a), which returns the stored blob to the portable §3 passphrase form, or
+  an off-device backup of the underlying secret made before binding.
+- **A consumer that binds a RECOVERY SEED MUST obtain that backup first (MUST).** Binding
+  an identity key that can be re-issued is a hardening win. Binding the sole copy of a seed
+  that controls funds converts a disk-theft defence into a hardware-failure funds-loss
+  path, because TPMs fail and mainboards get replaced on healthy machines. This crate
+  cannot detect which kind of secret it was handed, so the obligation sits with the caller;
+  `SPEC.md` states it here so no caller has to infer it.
+- **A surface reporting protection MUST read [`blob_tier`], not the host tier.** A capable
+  host does not retroactively protect bytes already at rest (§17.1), so the host tier
+  answers a different question and using it overstates the protection of an older blob.
+
 
 ### 17.6 Conformance additions
 
