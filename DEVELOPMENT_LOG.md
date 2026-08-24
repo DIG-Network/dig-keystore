@@ -193,5 +193,35 @@ the rendered module docs cited "SPEC.md §17" as if resolvable. If a repo has tw
 its spec, the packaged one is the one that ships — check `include` whenever a spec section
 is added.
 
+## chia-bls 0.26 -> 0.36.1: the derivation is identical, and that had never been proven
 
-<!-- lane: dig_ecosystem#1502 / #1303 -- WIP -->
+The uplift needed no source change at all — `SecretKey::{from_seed, from_bytes,
+to_bytes}`, `PublicKey`, `Signature`, `sign` and `verify` are shape-identical
+across the two lines. The whole risk was invisible: if EIP-2333 derivation had
+moved, every `DIGVK1`/`DIGLW1` keystore already at rest would have silently
+started opening onto a *different* identity. Nothing in the crate would have
+failed; the keys would just have been the wrong ones.
+
+The crate had a test for exactly this — `tests/vectors.rs`
+`bls_signing_deterministic_pubkey`, whose own doc comment says it catches
+"accidental version bumps in `chia-bls` that change EIP-2333 derivation". It
+could not: its expected constant still read `_REGENERATE_ME_ON_FIRST_RUN`, and
+the test `return`ed success down that branch. A "regenerate on first run" escape
+hatch is a test that passes for any value until someone remembers to close it,
+and nobody did across nine releases.
+
+So the sequence that makes an uplift like this safe is:
+
+1. **Bless the golden value on the OLD line first.** A value blessed after the
+   bump records whatever the new line does and proves nothing.
+2. **Prove the KAT is load-bearing by mutating production** — and check the
+   failure fires for the *right reason*. The first attempt here mutated both
+   `MAGIC` and the derivation at once, and the KAT failed on `UnknownMagic`
+   before it ever reached its value comparison. That looked like a passing
+   proof and was not one.
+3. **Then bump, and require the same value.**
+
+A second test in the same file, `magic_bytes_are_ascii`, declared its own
+private `Magic` trait holding `DIGVK1`/`DIGLW1` and asserted those literals
+against themselves — never reading `KeyScheme::MAGIC`. Both sides of an
+assertion coming from the same place proves only that `==` works.

@@ -46,7 +46,7 @@
 //!
 //! # References
 //!
-//! - [`chia-bls` crate](https://crates.io/crates/chia-bls) 0.26 — BLS12-381
+//! - [`chia-bls` crate](https://crates.io/crates/chia-bls) 0.36.1 — BLS12-381
 //!   primitives used by all shipped schemes.
 //! - [IETF draft-irtf-cfrg-bls-signature-05](https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-05)
 //!   — the augmented BLS scheme (`BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_AUG_`)

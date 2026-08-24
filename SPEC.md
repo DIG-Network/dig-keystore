@@ -248,7 +248,7 @@ MUST NOT be emitted.
 
 **Secret semantics (normative).** The stored secret is a **seed**, not a curve scalar.
 On every use, the BLS secret key is derived as `chia_bls::SecretKey::from_seed(seed)`
-(EIP-2333-style master-key derivation as implemented by `chia-bls` 0.26). Storing the
+(EIP-2333-style master-key derivation as implemented by `chia-bls` 0.36.1; the derivation is byte-identical to the 0.26 line this crate shipped on through v0.9.0, pinned by the `bls_signing_deterministic_pubkey` KAT). Storing the
 seed keeps the file interoperable with Chia tooling conventions and lets HD consumers
 regenerate the full key tree.
 
@@ -631,7 +631,7 @@ generated glue code is not `forbid(unsafe_code)`-clean — see §16.1.
 
 | Contract | Must match | Where |
 |---|---|---|
-| BLS signing algorithm | Chia's BLS12-381 AugScheme (`chia-bls` 0.26; `SecretKey::from_seed` + `chia_bls::sign`) — signatures MUST verify with `chia_bls::verify` and interoperate with Chia L1 `AGG_SIG` semantics | §6.2 |
+| BLS signing algorithm | Chia's BLS12-381 AugScheme (`chia-bls` 0.36.1; `SecretKey::from_seed` + `chia_bls::sign`) — signatures MUST verify with `chia_bls::verify` and interoperate with Chia L1 `AGG_SIG` semantics | §6.2 |
 | Default KDF cost | `dig-l1-wallet` uses the same Argon2id 64 MiB / 3 / 4 default, so both crates present a uniform offline-attack cost | §4.2 |
 | Keystore byte format | `dig-l1-wallet`'s encrypt/decrypt-bytes helpers wrap `MemoryBackend` and reuse the §3 format verbatim — the bytes they produce are valid keystore files byte-for-byte | §3, §10.4 |
 | File format stability | Every v1 file ever written MUST remain readable by all future releases (additive-only evolution; version-dispatched decoding) | §3.4 |
