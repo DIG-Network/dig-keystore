@@ -104,7 +104,7 @@ pub trait KeyScheme: Send + Sync + 'static {
     /// 6-byte file magic. Must be unique per scheme.
     ///
     /// Recognized values: `DIGVK1` (validator key), `DIGLW1` (L1 wallet).
-    /// New schemes must register their magic in [`crate::format::is_known_magic`]
+    /// New schemes must register their magic in `format::is_known_magic` (private)
     /// so the decoder accepts it.
     const MAGIC: [u8; 6];
 
