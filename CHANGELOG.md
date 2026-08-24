@@ -8,6 +8,11 @@ Behaviour changes that need action on upgrade are recorded in
 [docs/UPGRADING.md](docs/UPGRADING.md).
 
 
+## [0.10.0] - 2026-08-24
+
+### Features
+- **deps:** Bring chia-bls to the ecosystem 0.36.1 line, and make the derivation KAT able to fail (#15)
+
 ## [0.9.0] - 2026-08-21
 
 ### Features
