@@ -193,3 +193,5 @@ the rendered module docs cited "SPEC.md §17" as if resolvable. If a repo has tw
 its spec, the packaged one is the one that ships — check `include` whenever a spec section
 is added.
 
+
+<!-- lane: dig_ecosystem#1502 / #1303 -- WIP -->
