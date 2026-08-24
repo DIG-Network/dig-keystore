@@ -100,5 +100,12 @@ pub trait HardwareProvider: Send + Sync + 'static {
     /// MUST fail — never return arbitrary bytes — when `wrapped` was sealed by a
     /// different hardware key (for instance a blob copied from another machine).
     /// That failure *is* the cross-machine binding guarantee.
+    ///
+    /// **The same failure occurs when this device is the original one and its
+    /// key has since been destroyed** (a TPM clear, a mainboard swap), which is
+    /// permanent loss rather than a refusal. A provider cannot tell the two
+    /// apart — it holds a key, not a history — so it MUST NOT describe the
+    /// failure as recoverable or imply the blob can simply be moved back. See
+    /// `SPEC.md` §17.5b, which is normative for how this is reported.
     fn unwrap_key(&self, wrapped: &[u8]) -> Result<ContentKey>;
 }

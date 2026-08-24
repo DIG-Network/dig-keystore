@@ -210,13 +210,31 @@ pub enum KeystoreError {
 
     /// The hardware component could not unwrap a stored content key.
     ///
-    /// This variant means exactly one thing: **the hardware refused**. It is the
-    /// expected error when a sealed blob is copied to a *different machine* —
-    /// the wrapping key is non-exportable, so the copy cannot be opened — and
-    /// that refusal is the guarantee, not a malfunction. Structural problems
-    /// with the blob ([`MalformedEnvelope`](Self::MalformedEnvelope)) and
-    /// unnameable hardware ([`UnknownHardwareClass`](Self::UnknownHardwareClass))
-    /// are deliberately *not* reported here, so this variant keeps its meaning.
+    /// This variant means exactly one thing: **the hardware refused**. Structural
+    /// problems with the blob ([`MalformedEnvelope`](Self::MalformedEnvelope))
+    /// and unnameable hardware
+    /// ([`UnknownHardwareClass`](Self::UnknownHardwareClass)) are deliberately
+    /// *not* reported here, so this variant keeps that meaning.
+    ///
+    /// # It does NOT say which situation occurred (`SPEC.md` §17.5b)
+    ///
+    /// Two situations with opposite consequences both produce this error:
+    ///
+    /// - a sealed blob presented to a **different machine** — the wrapping key is
+    ///   non-exportable, so the copy cannot be opened. Recoverable: the sealing
+    ///   machine still holds the key. This refusal is the guarantee, not a
+    ///   malfunction.
+    /// - the **sealing machine itself, after its key was destroyed** by a TPM
+    ///   clear, a firmware update or a mainboard swap. The blob is permanently
+    ///   unopenable by anyone, and for a wallet seed that is funds loss.
+    ///
+    /// They are indistinguishable from the error because the envelope records a
+    /// hardware *class* and carries no device identity. So a caller **MUST NOT**
+    /// infer recoverability from this variant, and a user-facing surface **MUST
+    /// NOT** present a reassuring message on it — that is precisely the error the
+    /// irreversible case returns. Say that this host cannot open the blob and
+    /// that the machine which sealed it may be able to *if its trusted component
+    /// is intact*; the distinction is only resolvable out of band.
     #[error("hardware unwrap failed: {detail}")]
     HardwareUnwrapFailed {
         /// Non-secret detail of the failing operation.

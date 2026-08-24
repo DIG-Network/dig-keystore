@@ -248,7 +248,7 @@ MUST NOT be emitted.
 
 **Secret semantics (normative).** The stored secret is a **seed**, not a curve scalar.
 On every use, the BLS secret key is derived as `chia_bls::SecretKey::from_seed(seed)`
-(EIP-2333-style master-key derivation as implemented by `chia-bls` 0.26). Storing the
+(EIP-2333-style master-key derivation as implemented by `chia-bls` 0.36.1; the derivation is byte-identical to the 0.26 line this crate shipped on through v0.9.0, pinned by the `bls_signing_deterministic_pubkey` KAT). Storing the
 seed keeps the file interoperable with Chia tooling conventions and lets HD consumers
 regenerate the full key tree.
 
@@ -631,7 +631,7 @@ generated glue code is not `forbid(unsafe_code)`-clean — see §16.1.
 
 | Contract | Must match | Where |
 |---|---|---|
-| BLS signing algorithm | Chia's BLS12-381 AugScheme (`chia-bls` 0.26; `SecretKey::from_seed` + `chia_bls::sign`) — signatures MUST verify with `chia_bls::verify` and interoperate with Chia L1 `AGG_SIG` semantics | §6.2 |
+| BLS signing algorithm | Chia's BLS12-381 AugScheme (`chia-bls` 0.36.1; `SecretKey::from_seed` + `chia_bls::sign`) — signatures MUST verify with `chia_bls::verify` and interoperate with Chia L1 `AGG_SIG` semantics | §6.2 |
 | Default KDF cost | `dig-l1-wallet` uses the same Argon2id 64 MiB / 3 / 4 default, so both crates present a uniform offline-attack cost | §4.2 |
 | Keystore byte format | `dig-l1-wallet`'s encrypt/decrypt-bytes helpers wrap `MemoryBackend` and reuse the §3 format verbatim — the bytes they produce are valid keystore files byte-for-byte | §3, §10.4 |
 | File format stability | Every v1 file ever written MUST remain readable by all future releases (additive-only evolution; version-dispatched decoding) | §3.4 |
@@ -984,7 +984,7 @@ providers MUST be implemented outside it and injected through the `HardwareProvi
 They are planned for a `hardware/` workspace member that will mirror the `wasm/` split
 (§16), tracked as dig_ecosystem #1693.
 
-**No provider ships as of 0.5.0.** This section specifies the contract a provider MUST
+**No provider ships in any release to date.** This section specifies the contract a provider MUST
 satisfy; it does not describe shipped code. A caller that supplies none resolves
 `Software(NotRequested)`: honest, and explicitly not a claim of hardware protection.
 
@@ -1021,6 +1021,68 @@ properties:
   trusted component, and "unbound" over a still-bound blob is what makes that retirement
   lose the key.
 
+### 17.5b What happens when the hardware goes away (normative)
+
+Three situations end with the same symptom — a blob that no longer opens — and they have opposite
+consequences:
+
+| Situation | Consequence |
+|---|---|
+| **The blob is copied to another machine** (disk moved, image cloned, backup exfiltrated) while the sealing hardware still exists | **Not a defect. This is the property being bought.** Recoverable by returning to the original machine, which still holds the wrapping key. |
+| **The TPM is reset** (firmware update, BIOS/UEFI reset, mainboard swap, `Clear-Tpm`) | **Destruction.** The wrapping key is gone, so the blob is permanently unopenable by anyone including its owner. For a wallet seed this is FUNDS LOSS. |
+| **The machine is replaced or the device is lost** (hardware failure, theft, decommission) | **Destruction**, identically: the wrapping key never left the old device. |
+
+#### The error does NOT identify which one happened (normative)
+
+An implementation **MUST NOT** infer the situation from the error, and a user-facing surface **MUST
+NOT** describe an unwrap failure as recoverable.
+
+This is a structural limit, not an implementation gap. The envelope (§17.3) records a hardware
+**class** and nothing else — there is no device identity anywhere in the format — so a blob sealed
+by device A and presented to device B is byte-indistinguishable from that same blob presented to
+device A *after its key was destroyed*. Both produce `HardwareUnwrapFailed`, and the crate's own
+tests pin both halves of that collision:
+`a_blob_sealed_by_one_device_cannot_be_opened_by_another` (foreign device) and
+`unbind_leaves_the_blob_intact_when_the_hardware_can_no_longer_open_it` (cleared device).
+
+What the three errors DO mean, and what each leaves undetermined:
+
+| Error | Means | Leaves undetermined |
+|---|---|---|
+| `NotHardwareBound` | This host has no provider at all, so a wrapped blob cannot even be attempted. The ordinary shape of an exfiltrated blob opened on an attacker's machine. | Whether the sealing device still exists. |
+| `HardwareKindMismatch` | The blob was sealed by a different hardware **class** than this build binds to (a Secure-Enclave blob on a TPM host). | Which device of that class, and whether it survives. |
+| `HardwareUnwrapFailed` | A provider of the right class ran and refused. | **Whether this is a foreign device (recoverable) or the original device with its key destroyed (permanent).** |
+
+Therefore an implementation **MUST**:
+
+- **Report the failure without a recovery promise.** State that this host cannot open the blob and
+  that it may be openable on the machine that sealed it *if that machine's trusted component is
+  intact* — never that it is recoverable, because the same error is returned when it is not.
+- **Treat permanence as the planning assumption.** The distinction is only resolvable out of band, by
+  the operator knowing whether the sealing machine still exists and was never cleared. No amount of
+  inspection of the blob answers it.
+- **Never present a reassuring message on `HardwareUnwrapFailed`.** That is precisely the error the
+  irreversible cases produce.
+
+#### There is no recovery after the hardware is gone (normative)
+
+No passphrase, no support path, and no action by this crate recovers a wrapped blob whose wrapping
+key no longer exists. The only escape hatch is taken **in advance**, while the hardware still
+answers: either [`unbind`](#175a-binding-is-reversible-normative), which returns the stored blob to
+the portable §3 passphrase form, or an off-device backup of the underlying secret made before
+binding.
+
+- **A consumer that binds a RECOVERY SEED MUST obtain that backup first (MUST).** Binding an identity
+  key that can be re-issued is a hardening win. Binding the sole copy of a seed that controls funds
+  converts a disk-theft defence into a hardware-failure funds-loss path, because TPMs are cleared and
+  mainboards are replaced on otherwise healthy machines. This crate cannot detect which kind of
+  secret it was handed, so the obligation sits with the caller and is stated here so no caller has to
+  infer it.
+- **A surface reporting protection MUST read `blob_tier`, not the host tier.** A capable host does not
+  retroactively protect bytes already at rest (§17.1), so the host tier answers a different question
+  and using it overstates the protection of an older blob.
+
+
 ### 17.6 Conformance additions
 
 | # | Requirement | Spec |
@@ -1036,6 +1098,8 @@ properties:
 | C-25 | `unbind` returns a bound blob to a form a host with no hardware opens; a failed `unbind` leaves the stored bytes byte-identical | §17.5a |
 | C-26 | `bind` migrates an unwrapped blob up, is a no-op on an already-wrapped one, and restores the previous bytes when the new seal cannot be reopened from storage | §17.5a |
 | C-27 | An `unbind` the store did not take is reported as `HardwareStillBound`, never as success | §17.5a |
+| C-34 | The three refusal errors are produced by the paths §17.5b describes: no provider on the host yields `NotHardwareBound`, a different hardware class yields `HardwareKindMismatch`, and a right-class provider that refuses yields `HardwareUnwrapFailed` | §17.5b |
+| C-35 | A foreign device and a cleared device both yield `HardwareUnwrapFailed`, so the error alone does not distinguish a recoverable copy from a permanent loss | §17.5b |
 | C-29 | `OsKeychainBackend::open` returns `None` on Linux/wasm and the crate performs no fallback | §10.5 |
 
 Test evidence: `src/hardware/tests.rs` (tier resolution, fail-closed policy, cross-device

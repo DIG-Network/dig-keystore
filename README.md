@@ -2,7 +2,7 @@
 
 Encrypted secret-key storage for [DIG Network](https://github.com/DIG-Network) binaries. Typed `Keystore<K>`, AES-256-GCM + Argon2id, `Zeroizing` memory hygiene, filesystem-atomic writes. The single audit surface for "where validator and wallet keys live" in the DIG workspace.
 
-Builds on [`chia-bls` 0.26](https://crates.io/crates/chia-bls) for BLS12-381 keys / signatures; see [`CRATES_SUMMARY.md`](../dig-network/CRATES_SUMMARY.md) for the full DIG + Chia stack.
+Builds on [`chia-bls` 0.36.1](https://crates.io/crates/chia-bls) for BLS12-381 keys / signatures; see [`CRATES_SUMMARY.md`](../dig-network/CRATES_SUMMARY.md) for the full DIG + Chia stack.
 
 - **Format version:** `0x0001` (see [`docs/resources/SPEC.md`](docs/resources/SPEC.md))
 - **Default KDF:** Argon2id, 64 MiB / 3 iterations / 4 lanes
