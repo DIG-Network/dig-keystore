@@ -189,12 +189,6 @@ impl FakeDevice {
         *self.device_key.lock() = [device_id; 32];
     }
 
-    /// Succeed at `n` more unwraps, then fail every one after that.
-    ///
-    /// Models a component that is healthy when inspected and unusable moments
-    /// later. The constructor self-test spends exactly one unwrap, so
-    /// `failing_unwrap_after(1)` yields a device that resolves a genuine
-    /// hardware tier and then cannot reopen the next thing it seals.
     /// Report the configured probe outcome `n` more times, then report
     /// [`HardwareProbe::Indeterminate`] for every probe after that.
     ///
@@ -209,6 +203,13 @@ impl FakeDevice {
         self
     }
 
+    /// Succeed at `n` more unwraps, then fail every one after that.
+    ///
+    /// Models a component that is healthy when inspected and unusable moments
+    /// later. The constructor self-test spends exactly one unwrap, so
+    /// `failing_unwrap_after(1)` yields a device that resolves a genuine
+    /// hardware tier and then cannot reopen the next thing it seals.
+    #[must_use]
     pub fn failing_unwrap_after(self, n: usize) -> Self {
         *self.unwraps_left.lock() = Some(n);
         self
