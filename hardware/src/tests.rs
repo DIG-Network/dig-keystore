@@ -281,9 +281,15 @@ fn an_answerable_existence_probe_answers_both_ways() {
     )
     .expect("proven");
 
-    assert_eq!(backend.exists(&key()).expect("answerable"), false);
+    assert!(
+        !backend.exists(&key()).expect("answerable"),
+        "a vacant key is confidently absent, not an error"
+    );
     backend.write(&key(), SEALED_BLOB).expect("write");
-    assert_eq!(backend.exists(&key()).expect("answerable"), true);
+    assert!(
+        backend.exists(&key()).expect("answerable"),
+        "a written key is confidently present"
+    );
 }
 
 /// **Property:** the exclusivity a caller relies on to avoid clobbering is the

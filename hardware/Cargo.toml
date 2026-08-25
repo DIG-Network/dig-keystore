@@ -11,10 +11,21 @@ readme = "README.md"
 keywords = ["dig-network", "keystore", "tpm", "secure-enclave", "cng"]
 categories = ["cryptography", "os"]
 
-include = ["src/**/*.rs", "Cargo.toml", "README.md", "LICENSE*"]
+# Explicit allow-list: the repo tracks build artefacts that must not reach the
+# published tarball. `tests/` is included deliberately — `windows_tpm.rs` is the
+# only evidence for conformance C-42, and a consumer auditing the
+# non-exportability claim should not have to leave crates.io to read it.
+include = [
+    "src/**/*.rs",
+    "tests/**/*.rs",
+    "examples/**/*.rs",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE*",
+]
 
 [dependencies]
-dig-keystore = { version = "0.11.0", path = "..", default-features = false }
+dig-keystore = { version = "0.12.0", path = "..", default-features = false }
 zeroize = { version = "1.7", features = ["derive"] }
 
 # Windows CNG (`ncrypt.dll`) bindings. Target-gated: nothing else in this crate
@@ -26,7 +37,7 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
-dig-keystore = { version = "0.11.0", path = "..", features = ["testing"] }
+dig-keystore = { version = "0.12.0", path = "..", features = ["testing"] }
 
 [lints.rust]
 missing_docs = "warn"

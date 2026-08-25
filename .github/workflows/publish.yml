@@ -92,6 +92,18 @@ jobs:
           path: lcov.info
           if-no-files-found: error
 
+      # `default-members = ["."]`, so every step above operates on the root package
+      # ONLY — the `hardware/` member is invisible to all of them. Its ladder is
+      # deliberately platform-independent (the tier decision is the code that runs on
+      # hosts WITHOUT a trusted component, which is most of them), so it is gated here
+      # on ubuntu as well as on the platform matrix below. Omitting this would leave
+      # the degrade ladder tested only where the hardware exists, which is exactly
+      # backwards.
+      - name: Clippy + test dig-keystore-hardware (ladder; no trusted component here)
+        run: |
+          cargo clippy -p dig-keystore-hardware --all-targets -- -D warnings
+          cargo test -p dig-keystore-hardware
+
       - name: Check documentation
         run: cargo doc --no-deps --all-features
 
@@ -140,6 +152,21 @@ jobs:
       # this stays deterministic on a runner whose keychain may be locked.
       - name: Run tests
         run: cargo test --all-features
+
+      # The whole reason `hardware/` is a separate member: its FFI cannot compile
+      # under the root crate's `unsafe_code = "forbid"`. This is the only job that
+      # compiles it against a real platform SDK.
+      #
+      # `DIG_KEYSTORE_REQUIRE_TPM` is deliberately NOT set. A GitHub runner is not
+      # documented to expose a TPM, and setting it would turn an unproven assumption
+      # about the runner into a red build. Unset, the hardware tests still run and
+      # report which properties they did NOT exercise — a pass here means "the
+      # degraded path is correct", never "the TPM path is correct". Set the variable
+      # on a self-hosted runner that genuinely has one.
+      - name: Clippy + test dig-keystore-hardware (platform FFI)
+        run: |
+          cargo clippy -p dig-keystore-hardware --all-targets -- -D warnings
+          cargo test -p dig-keystore-hardware -- --nocapture
 
   wasm:
     name: wasm build + clippy + wasm-bindgen-test
@@ -221,6 +248,36 @@ jobs:
           fi
 
       - name: Publish to crates.io
+        run: cargo publish --allow-dirty --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      # `dig-keystore-hardware` depends on `dig-keystore` by VERSION (the `path` is
+      # stripped on publish), so it cannot be published until the version just pushed
+      # is resolvable from the index. The index lags the publish by seconds to minutes,
+      # and a `cargo publish` that runs too early fails with what reads exactly like
+      # "that version does not exist" — so this waits rather than guessing.
+      #
+      # The `User-Agent` header is REQUIRED: without it crates.io answers with
+      # something indistinguishable from "not published", which would make this loop
+      # time out on a perfectly good release.
+      - name: Wait for dig-keystore to appear in the crates.io index
+        run: |
+          set -euo pipefail
+          VERSION=$(python3 -c 'import tomllib;print(tomllib.load(open("Cargo.toml","rb"))["package"]["version"])')
+          for attempt in $(seq 1 60); do
+            if curl -sfH 'User-Agent: dig-keystore-ci'                  https://index.crates.io/di/g-/dig-keystore                | grep -q "\"vers\":\"${VERSION}\""; then
+              echo "dig-keystore ${VERSION} is resolvable"
+              exit 0
+            fi
+            echo "attempt ${attempt}: dig-keystore ${VERSION} not in the index yet"
+            sleep 10
+          done
+          echo "dig-keystore ${VERSION} never appeared in the index" >&2
+          exit 1
+
+      - name: Publish dig-keystore-hardware to crates.io
+        working-directory: hardware
         run: cargo publish --allow-dirty --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

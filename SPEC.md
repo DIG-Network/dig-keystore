@@ -1060,12 +1060,62 @@ Offset      Size  Field          Value / semantics
 Platform bindings belong outside this package. `unsafe_code = "forbid"` is a spec-pinned
 property of this crate (§13.2, C-15), and CNG / Security Framework FFI cannot satisfy it, so
 providers MUST be implemented outside it and injected through the `HardwareProvider` trait.
-They are planned for a `hardware/` workspace member that will mirror the `wasm/` split
-(§16), tracked as dig_ecosystem #1693.
+They live in the `dig-keystore-hardware` workspace member under `hardware/`, mirroring the
+`wasm/` split (§16).
 
-**No provider ships in any release to date.** This section specifies the contract a provider MUST
-satisfy; it does not describe shipped code. A caller that supplies none resolves
-`Software(NotRequested)`: honest, and explicitly not a claim of hardware protection.
+Provider availability, per platform:
+
+| Platform | Binding | Status |
+|---|---|---|
+| Windows | TPM 2.0 via the CNG **Microsoft Platform Crypto Provider** | implemented |
+| macOS | Secure Enclave (`kSecAttrTokenIDSecureEnclave`) | not implemented |
+| Linux | TPM 2.0 / TEE-backed Secret Service | not implemented |
+
+A caller that supplies no provider resolves `Software(NotRequested)`: honest, and explicitly
+not a claim of hardware protection.
+
+**A platform with no binding MUST NOT be reported as `NoHardwarePresent`.** That reason is a
+*confident claim about the machine*, and a build carrying no binding for a platform has
+inspected no machine on it. Such a platform contributes no candidate and reports
+`PlatformUnsupported`, which names the build rather than the hardware. Reporting an
+unimplemented platform as an absence is the same defect class as a two-valued existence probe
+(§10.2): an unknown asserted as a confident negative.
+
+#### 17.5d The candidate ladder (normative)
+
+A caller MAY offer several candidate providers in preference order. Walking that list MUST:
+
+1. Select the **first** candidate that resolves to a hardware tier under §17.2, and **MUST NOT
+   probe any candidate after it**. Probing a trusted component has a side effect — it can
+   create a persisted wrapping key — so continuing past a settled answer provisions hardware
+   the host has already declined to use.
+2. Judge each candidate permissively, so that one candidate's negative outcome yields a
+   *reason* rather than aborting the walk. A caller policy stricter than `Optional` MUST NOT
+   be applied per candidate: doing so lets an early `Indeterminate` error out while a working
+   later candidate sits unexamined, turning a host that genuinely has hardware into one that
+   will not open at all.
+3. Apply the caller policy **once**, per §17.2's table, to the single reason the walk settles
+   on.
+4. Settle that reason by this precedence, which is a fail-closed ordering rather than a
+   preference: **`ProbeIndeterminate` outranks everything**, then `HardwareUnusable`, then
+   `NoHardwarePresent`, and an empty candidate list is `NotRequested`. `NoHardwarePresent` is
+   reportable only when **every** candidate agreed on it. A reason this ordering does not
+   recognise MUST rank above `NoHardwarePresent`, so an unfamiliar outcome is never summarised
+   into a confident negative.
+5. Carry the settled reason into the constructed backend. Reducing it to `NotRequested`
+   because no provider was ultimately selected reports "nobody asked" on a host that asked,
+   looked, and found none.
+
+#### 17.5e Non-exportability is asserted, not declared (normative)
+
+A provider MUST NOT report `NonExportable` custody unless the wrapping key was created
+non-exportable **and** the platform has actually refused an export attempt. The refusal MUST
+be attempted against the platform — a provider that assumes it makes precisely the claim
+nothing else in the system re-checks, since §17.2's self-test verifies the wrap round-trip and
+takes custody at its word.
+
+An export that **succeeds** is not a warning: the provider MUST then report `ProcessMemory`
+custody, which §17.2 rejects as a hardware tier.
 
 ### 17.5a Binding is REVERSIBLE (normative)
 
@@ -1227,10 +1277,24 @@ it.
 | C-37 | `exists` returns `Err`, never `Ok(false)`, when the store could not determine presence — so an unanswerable read never authorises a mint over a replacing `write` | §10.2 |
 | C-38 | `write_new` establishes only into a vacant key, reports a collision as the adoptable `AlreadyExists`, and leaves existing bytes byte-identical | §10.2 |
 | C-39 | `write_new_exclusivity` reports `Atomic` only where the store creates-if-absent indivisibly; the default is `BestEffort` so silence understates | §10.2, §10.2a |
+| C-40 | A platform with no binding contributes no candidate and reports `PlatformUnsupported`, never `NoHardwarePresent` | §17.5 |
+| C-41 | The ladder selects the first proven candidate and probes none after it; the caller policy is applied once to a settled reason whose precedence ranks `ProbeIndeterminate` above every confident reason; that reason reaches the constructed backend rather than collapsing to `NotRequested` | §17.5d |
+| C-42 | A provider reports `NonExportable` only after the platform has refused a real export attempt; an export that succeeds demotes custody to `ProcessMemory` | §17.5e |
 
 Test evidence: `src/hardware/tests.rs` (tier resolution, fail-closed policy, cross-device
 binding, envelope codec) and `tests/hardware_v1_compat.rs` (committed golden v1 blobs
 decrypted in every tier).
+
+C-40..C-42 are evidenced in the `hardware/` member: `src/ladder/tests.rs` (precedence,
+fall-through, first-proven selection), `src/tests.rs` (the settled reason surviving the
+composition, the floor, cross-device refusal) and `src/platform.rs` (unsupported-platform
+reporting) — all of which run on any host, with no trusted component.
+
+`hardware/tests/windows_tpm.rs` carries the assertions that require real silicon. They are
+binding only when `DIG_KEYSTORE_REQUIRE_TPM=1`, which makes an absent TPM a failure rather
+than a skip; unset, the same tests assert the complementary unbound-host properties and report
+which properties were **not** exercised. **A run without that variable is not evidence for
+C-42**, and MUST NOT be read as one.
 
 ---
 
