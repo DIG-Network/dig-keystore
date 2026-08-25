@@ -8,6 +8,11 @@ Behaviour changes that need action on upgrade are recorded in
 [docs/UPGRADING.md](docs/UPGRADING.md).
 
 
+## [0.11.0] - 2026-08-25
+
+### Features
+- **backend:** Make an undeterminable read refuse rather than mint, and offer an exclusive create (#17)
+
 ## [0.10.0] - 2026-08-24
 
 ### Features
