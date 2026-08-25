@@ -111,6 +111,25 @@ impl HardwareBoundBackend {
         })
     }
 
+    /// Decorate `inner` with a settled software tier and NO provider.
+    ///
+    /// For a caller that has already established why hardware is unavailable and
+    /// would otherwise lose that reason: passing `provider = None` to
+    /// [`new`](Self::new) reports [`DegradeReason::NotRequested`], which on a
+    /// host that *was* inspected and found wanting is simply untrue.
+    ///
+    /// This constructor cannot claim hardware — it takes a
+    /// [`DegradeReason`] and produces a [`ProtectionTier::Software`] — so it
+    /// widens what can be reported honestly without widening what can be
+    /// reported at all.
+    pub fn degraded<B: KeychainBackend>(inner: B, reason: DegradeReason) -> Self {
+        Self {
+            inner: Arc::new(inner),
+            provider: None,
+            tier: ProtectionTier::Software(reason),
+        }
+    }
+
     /// What this **host** is bound to — the tier every *newly written* blob gets.
     ///
     /// This is a statement about the machine, not about any particular stored
@@ -352,10 +371,33 @@ fn resolve_tier(
     provider: Option<&dyn HardwareProvider>,
     policy: HardwarePolicy,
 ) -> Result<ProtectionTier> {
-    let Some(provider) = provider else {
-        return degrade(DegradeReason::NotRequested, policy);
-    };
+    match provider {
+        Some(provider) => resolve_provider_tier(provider, policy),
+        None => degrade_under(DegradeReason::NotRequested, policy),
+    }
+}
 
+/// Resolve the protection tier ONE provider earns on this host: probe it, then
+/// self-test it, then apply `policy` to whatever came back.
+///
+/// This is the same decision [`HardwareBoundBackend::new`] makes internally, and
+/// it is public so that a *ladder* of candidate providers — the `hardware/`
+/// workspace member (dig_ecosystem #1693) walks one — can ask the question per
+/// candidate without re-deriving the self-test. A second implementation of
+/// "is this provider trustworthy?" is precisely the rival that would eventually
+/// disagree with this one, and the disagreement would be silent.
+///
+/// A provider is never taken at its word: `probe()` is a claim, and the wrap /
+/// unwrap round-trip run here is what makes the claim refutable.
+///
+/// # Errors
+///
+/// Exactly as [`HardwareBoundBackend::new`]: fails closed per `policy` rather
+/// than silently degrading.
+pub fn resolve_provider_tier(
+    provider: &dyn HardwareProvider,
+    policy: HardwarePolicy,
+) -> Result<ProtectionTier> {
     match provider.probe() {
         HardwareProbe::Absent => degrade(DegradeReason::NoHardwarePresent, policy),
 
@@ -374,6 +416,43 @@ fn resolve_tier(
             Err(detail) => degrade(DegradeReason::HardwareUnusable { detail }, policy),
         },
     }
+}
+
+/// Apply `policy` to a settled [`DegradeReason`], yielding a tier or the error
+/// the policy requires.
+///
+/// Public for the same reason as [`resolve_provider_tier`]: a candidate ladder
+/// applies the caller policy ONCE, to the reason it finally settles on, and must
+/// apply exactly the rule this crate applies rather than a lookalike.
+///
+/// # Both fail-closed rules, not just the obvious one
+///
+/// [`Required`](HardwarePolicy::Required) rejecting every software outcome is the
+/// visible rule. The second one is easier to lose: under the default
+/// [`Preferred`](HardwarePolicy::Preferred), a reason of
+/// [`ProbeIndeterminate`](DegradeReason::ProbeIndeterminate) is an **error**, not
+/// a degrade — otherwise a transient probe failure silently strips hardware
+/// protection from a machine that has it, and the resulting software blob then
+/// opens anywhere.
+///
+/// The private helper this wraps enforces only the first rule, because its one
+/// caller had already branched on the second. Anything reaching this function has
+/// not, so both are applied here.
+///
+/// # Errors
+///
+/// [`KeystoreError::HardwareRequired`] under `Required`;
+/// [`KeystoreError::HardwareProbeIndeterminate`] under `Preferred` when the host
+/// could not be inspected.
+pub fn degrade_under(reason: DegradeReason, policy: HardwarePolicy) -> Result<ProtectionTier> {
+    if let DegradeReason::ProbeIndeterminate { detail } = &reason {
+        if !policy.allows_indeterminate_degrade() && policy.allows_degrade() {
+            return Err(KeystoreError::HardwareProbeIndeterminate {
+                detail: detail.clone(),
+            });
+        }
+    }
+    degrade(reason, policy)
 }
 
 /// Refute or confirm a provider's "hardware is available" claim.

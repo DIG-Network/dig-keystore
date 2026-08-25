@@ -92,6 +92,17 @@ pub struct FakeDevice {
     /// another [`WrapBehaviour`] variant. Shared like the key, for the same
     /// reason.
     unwraps_left: Arc<Mutex<Option<usize>>>,
+    /// How many more `probe` calls report the configured outcome before the
+    /// device reports [`HardwareProbe::Indeterminate`], or `None` for a device
+    /// whose probe never changes.
+    ///
+    /// Temporal variation, for the same reason `unwraps_left` exists: a device
+    /// that is uninspectable from the start never reaches the composed paths
+    /// under test, because the FIRST resolution already refuses it. Expressing
+    /// "inspectable once, uninspectable moments later" — a TPM that becomes
+    /// contended between two resolutions — needs a budget rather than a fixed
+    /// probe. Shared like the key, so a clone observes the same countdown.
+    probes_left: Arc<Mutex<Option<usize>>>,
     /// The last content key this device was asked to wrap.
     ///
     /// Serves two purposes: it lets a test assert that the plaintext content key
@@ -113,6 +124,7 @@ impl FakeDevice {
             behaviour: WrapBehaviour::Honest,
             device_key: Arc::new(Mutex::new([device_id; 32])),
             unwraps_left: Arc::default(),
+            probes_left: Arc::default(),
             last_wrapped: Arc::default(),
         }
     }
@@ -177,12 +189,27 @@ impl FakeDevice {
         *self.device_key.lock() = [device_id; 32];
     }
 
+    /// Report the configured probe outcome `n` more times, then report
+    /// [`HardwareProbe::Indeterminate`] for every probe after that.
+    ///
+    /// Models a trusted component that is inspectable when first asked and
+    /// contended moments later — a TPM busy with BitLocker, Credential Guard or
+    /// Windows Hello. A composition that resolves the tier TWICE inspects such a
+    /// device twice and gets two different answers, which is the only way to
+    /// exercise the second resolution's policy handling.
+    #[must_use]
+    pub fn indeterminate_probe_after(self, n: usize) -> Self {
+        *self.probes_left.lock() = Some(n);
+        self
+    }
+
     /// Succeed at `n` more unwraps, then fail every one after that.
     ///
     /// Models a component that is healthy when inspected and unusable moments
     /// later. The constructor self-test spends exactly one unwrap, so
     /// `failing_unwrap_after(1)` yields a device that resolves a genuine
     /// hardware tier and then cannot reopen the next thing it seals.
+    #[must_use]
     pub fn failing_unwrap_after(self, n: usize) -> Self {
         *self.unwraps_left.lock() = Some(n);
         self
@@ -210,7 +237,17 @@ impl HardwareProvider for FakeDevice {
     }
 
     fn probe(&self) -> HardwareProbe {
-        self.probe.clone()
+        let mut budget = self.probes_left.lock();
+        match budget.as_mut() {
+            Some(0) => HardwareProbe::Indeterminate {
+                detail: "fake device became uninspectable".to_owned(),
+            },
+            Some(left) => {
+                *left -= 1;
+                self.probe.clone()
+            }
+            None => self.probe.clone(),
+        }
     }
 
     fn custody(&self) -> KeyCustody {

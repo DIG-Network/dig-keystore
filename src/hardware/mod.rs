@@ -74,7 +74,7 @@ pub mod envelope;
 mod provider;
 mod tier;
 
-pub use backend::HardwareBoundBackend;
+pub use backend::{degrade_under, resolve_provider_tier, HardwareBoundBackend};
 pub use provider::{ContentKey, HardwareProvider, KeyCustody, CONTENT_KEY_LEN};
 pub use tier::{DegradeReason, HardwareKind, HardwarePolicy, HardwareProbe, ProtectionTier};
 

@@ -1,0 +1,43 @@
+[package]
+name = "dig-keystore-hardware"
+version = "0.1.0"
+edition = "2021"
+description = "Platform trusted-component providers for dig-keystore: Windows TPM 2.0 via the CNG Platform Crypto Provider, Apple Secure Enclave, Linux TPM 2.0."
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/DIG-Network/dig-keystore"
+homepage = "https://github.com/DIG-Network/dig-keystore"
+documentation = "https://docs.rs/dig-keystore-hardware"
+readme = "README.md"
+keywords = ["dig-network", "keystore", "tpm", "secure-enclave", "cng"]
+categories = ["cryptography", "os"]
+
+# Explicit allow-list: the repo tracks build artefacts that must not reach the
+# published tarball. `tests/` is included deliberately — `windows_tpm.rs` is the
+# only evidence for conformance C-42, and a consumer auditing the
+# non-exportability claim should not have to leave crates.io to read it.
+include = [
+    "src/**/*.rs",
+    "tests/**/*.rs",
+    "examples/**/*.rs",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE*",
+]
+
+[dependencies]
+dig-keystore = { version = "0.12.0", path = "..", default-features = false }
+zeroize = "1.7"
+
+# Windows CNG (`ncrypt.dll`) bindings. Target-gated: nothing else in this crate
+# needs them, and a non-Windows build must not carry a Windows dependency.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+] }
+
+[dev-dependencies]
+dig-keystore = { version = "0.12.0", path = "..", features = ["testing"] }
+
+[lints.rust]
+missing_docs = "warn"

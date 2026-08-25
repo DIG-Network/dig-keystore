@@ -126,6 +126,23 @@ pub enum DegradeReason {
     /// explicitly opted out.
     NotRequested,
 
+    /// **This build ships no provider for this platform.** The host was never
+    /// inspected, so nothing is known about whether it has a trusted component.
+    ///
+    /// Deliberately distinct from
+    /// [`NoHardwarePresent`](Self::NoHardwarePresent), which is a *confident
+    /// claim about the machine*. Reporting an unimplemented platform as an
+    /// absence would assert a fact no code here established — the same
+    /// unknown-reported-as-a-confident-negative defect the three-valued
+    /// [`HardwareProbe`](super::HardwareProbe) exists to prevent.
+    ///
+    /// Distinct from [`NotRequested`](Self::NotRequested) too: the caller DID
+    /// ask, and this build could not answer.
+    PlatformUnsupported {
+        /// Non-secret detail naming the platform and what is missing.
+        detail: String,
+    },
+
     /// **This particular blob** is not hardware-wrapped, whatever the host is
     /// capable of.
     ///
@@ -147,6 +164,9 @@ impl fmt::Display for DegradeReason {
                 write!(f, "hardware present but unusable: {detail}")
             }
             Self::NotRequested => f.write_str("hardware binding not requested"),
+            Self::PlatformUnsupported { detail } => {
+                write!(f, "no hardware provider for this platform: {detail}")
+            }
             Self::BlobNotWrapped => f.write_str("this key material is not hardware-wrapped"),
         }
     }
