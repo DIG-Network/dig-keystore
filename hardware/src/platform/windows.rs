@@ -569,6 +569,35 @@ mod tests {
         );
     }
 
+    /// **Property:** the diagnostic surfaces report the binding state without
+    /// rendering the handle or anything derived from the key.
+    ///
+    /// `CngPlatformKeyProvider` holds live `NCRYPT` handles, so its `Debug` is
+    /// hand-written rather than derived. That makes it real code on the path an
+    /// operator reads when a TPM is not being used, and it is asserted rather
+    /// than assumed.
+    #[test]
+    fn the_diagnostic_surfaces_report_state_without_rendering_the_handle() {
+        let rendered = format!("{:?}", CngPlatformKeyProvider::absent());
+        assert!(rendered.contains("bound: false"), "got {rendered}");
+        assert!(rendered.contains("ProcessMemory"), "got {rendered}");
+        assert!(rendered.contains("Absent"), "got {rendered}");
+        assert!(
+            !rendered.contains("NCRYPT"),
+            "no handle may reach a log line: {rendered}"
+        );
+
+        let unavailable = CngUnavailable {
+            detail: "Platform Crypto Provider unavailable".to_owned(),
+            code: NTE_NOT_FOUND,
+        };
+        assert_eq!(
+            unavailable.to_string(),
+            "Platform Crypto Provider unavailable",
+            "Display carries the non-secret detail verbatim"
+        );
+    }
+
     /// **Property:** an unbound provider refuses to wrap rather than returning
     /// something wrap-shaped.
     #[test]
@@ -578,5 +607,39 @@ mod tests {
             .wrap_key(&ContentKey::new([7u8; CONTENT_KEY_LEN]))
             .expect_err("no key is bound, so nothing can be wrapped");
         assert!(matches!(err, KeystoreError::HardwareWrapFailed { .. }));
+    }
+
+    /// **Property:** an unbound provider refuses to UNWRAP too.
+    ///
+    /// Tested separately from the wrap arm because the two go through different
+    /// error variants, and `unwrap_key` is the one whose failure a caller is most
+    /// tempted to treat as recoverable (`SPEC.md` §17.5b).
+    #[test]
+    fn an_unbound_provider_refuses_to_unwrap() {
+        let err = CngPlatformKeyProvider::absent()
+            .unwrap_key(&[1, 2, 3, 4])
+            .expect_err("no key is bound, so nothing can be unwrapped");
+        assert!(
+            matches!(err, KeystoreError::HardwareWrapFailed { .. }),
+            "got {err:?}"
+        );
+    }
+
+    /// **Property:** the kind is fixed for this provider, whatever its binding
+    /// state.
+    ///
+    /// `HardwareKind` is the discriminant written into a sealed envelope header,
+    /// so a provider that reported a different kind when degraded would let the
+    /// class recorded in a blob depend on whether the TPM happened to answer.
+    #[test]
+    fn the_hardware_kind_does_not_depend_on_the_binding_state() {
+        assert_eq!(
+            CngPlatformKeyProvider::absent().kind(),
+            HardwareKind::WindowsTpm20
+        );
+        assert_eq!(
+            CngPlatformKeyProvider::unreachable("down").kind(),
+            HardwareKind::WindowsTpm20
+        );
     }
 }

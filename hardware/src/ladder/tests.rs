@@ -27,7 +27,7 @@ use dig_keystore::hardware::{
 };
 use dig_keystore::KeystoreError;
 
-use super::{walk, AttemptOutcome};
+use super::{settled_reason, walk, AttemptOutcome};
 
 /// The three kinds are used purely as distinguishable labels, so that "which
 /// candidate was selected" is observable rather than inferred.
@@ -411,5 +411,140 @@ fn a_provider_is_held_exactly_when_the_tier_claims_hardware() {
     assert!(
         degraded.provider().is_none(),
         "a degraded rung must not hand back a provider it refused to trust"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The unranked arm, and the reporting surface
+// ---------------------------------------------------------------------------
+
+/// **Property (C-41):** a reason the precedence does not recognise still outranks
+/// the confident negative.
+///
+/// `DegradeReason` is `#[non_exhaustive]`, so a variant this ordering has never
+/// seen WILL appear — `PlatformUnsupported` already has. The failure mode is
+/// quiet: an unfamiliar reason falling through to `NoHardwarePresent` reports
+/// "this machine has no trusted component" on the strength of an outcome nobody
+/// classified.
+///
+/// Asserted against `settled_reason` directly because `walk` cannot yet produce
+/// such a reason — the arm would otherwise be unreachable, and an unreachable
+/// guard is indistinguishable from an absent one.
+#[test]
+fn an_unrecognised_reason_outranks_the_confident_negative() {
+    let unranked = DegradeReason::PlatformUnsupported {
+        detail: "no binding for this platform".to_owned(),
+    };
+
+    assert_eq!(
+        settled_reason(&[DegradeReason::NoHardwarePresent, unranked.clone()]),
+        unranked,
+        "an unclassified outcome must not be summarised as an absence"
+    );
+    // Order-independent, like the indeterminate rule it mirrors.
+    assert_eq!(
+        settled_reason(&[unranked.clone(), DegradeReason::NoHardwarePresent]),
+        unranked
+    );
+}
+
+/// **The control:** uncertainty still outranks the unrecognised reason, and a
+/// refuted self-test still outranks it too.
+///
+/// Without this pair, an implementation that returned the unranked reason
+/// unconditionally would pass the test above.
+#[test]
+fn an_unrecognised_reason_does_not_outrank_uncertainty_or_a_refutation() {
+    let unranked = DegradeReason::PlatformUnsupported {
+        detail: "no binding".to_owned(),
+    };
+    let uncertain = DegradeReason::ProbeIndeterminate {
+        detail: "probe failed".to_owned(),
+    };
+    let refuted = DegradeReason::HardwareUnusable {
+        detail: "wrap failed".to_owned(),
+    };
+
+    assert_eq!(
+        settled_reason(&[unranked.clone(), uncertain.clone()]),
+        uncertain
+    );
+    assert_eq!(settled_reason(&[unranked, refuted.clone()]), refuted);
+}
+
+/// **Property:** an empty rejection list is `NotRequested`, and this is asserted
+/// on `settled_reason` itself as well as through `walk`.
+#[test]
+fn no_rejections_settle_on_not_requested() {
+    assert_eq!(settled_reason(&[]), DegradeReason::NotRequested);
+}
+
+/// **Property:** the ladder's own reporting surface says whether a provider is
+/// held without exposing the provider.
+///
+/// `Rung` cannot derive `Debug` — `dyn HardwareProvider` is a handle to a trusted
+/// component, and a derived `Debug` on one would be a standing invitation to
+/// print its innards. The hand-written impl is therefore real code on the
+/// diagnostic path, and it is asserted rather than assumed.
+#[test]
+fn the_rung_debug_reports_binding_without_exposing_the_provider() {
+    let bound = walk(
+        &candidates(vec![FakeDevice::working(FIRST, 1)]),
+        HardwarePolicy::Preferred,
+    )
+    .expect("proven");
+
+    let rendered = format!("{bound:?}");
+    assert!(rendered.contains("provider_bound: true"), "got {rendered}");
+    assert!(rendered.contains("Selected"), "got {rendered}");
+    assert!(
+        !rendered.contains("FakeDevice"),
+        "the provider itself must not be rendered: {rendered}"
+    );
+
+    // Both arms: a degraded rung must report the absence of a provider, not omit
+    // the field.
+    let degraded = walk(
+        &candidates(vec![FakeDevice::absent(FIRST)]),
+        HardwarePolicy::Optional,
+    )
+    .expect("Optional always opens");
+    assert!(
+        format!("{degraded:?}").contains("provider_bound: false"),
+        "got {degraded:?}"
+    );
+}
+
+/// **Property:** the attempt list is a faithful, ordered account of the walk.
+///
+/// It is the only record of what happened to the candidates that did not win, so
+/// an operator diagnosing "why is my TPM not being used?" reads this and nothing
+/// else.
+#[test]
+fn the_attempt_list_records_every_candidate_in_order() {
+    let rung = walk(
+        &candidates(vec![
+            FakeDevice::absent(FIRST),
+            FakeDevice::working(SECOND, 2),
+            FakeDevice::working(THIRD, 3),
+        ]),
+        HardwarePolicy::Preferred,
+    )
+    .expect("the second candidate is proven");
+
+    let kinds: Vec<_> = rung.attempts().iter().map(|a| a.kind).collect();
+    assert_eq!(kinds, vec![FIRST, SECOND, THIRD]);
+    assert!(matches!(
+        rung.attempts()[0].outcome,
+        AttemptOutcome::Rejected(DegradeReason::NoHardwarePresent)
+    ));
+    assert_eq!(rung.attempts()[1].outcome, AttemptOutcome::Selected);
+    assert_eq!(rung.attempts()[2].outcome, AttemptOutcome::NotReached);
+
+    // `into_provider` hands back the SELECTED candidate, not the first one.
+    assert_eq!(
+        rung.into_provider().expect("selected").kind(),
+        SECOND,
+        "the consumed handle must be the candidate that won"
     );
 }

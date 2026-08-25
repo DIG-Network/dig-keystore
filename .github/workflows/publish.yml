@@ -99,10 +99,17 @@ jobs:
       # on ubuntu as well as on the platform matrix below. Omitting this would leave
       # the degrade ladder tested only where the hardware exists, which is exactly
       # backwards.
-      - name: Clippy + test dig-keystore-hardware (ladder; no trusted component here)
-        run: |
-          cargo clippy -p dig-keystore-hardware --all-targets -- -D warnings
-          cargo test -p dig-keystore-hardware
+      - name: Clippy dig-keystore-hardware (ladder; no trusted component here)
+        run: cargo clippy -p dig-keystore-hardware --all-targets -- -D warnings
+
+      # Gated at the same >=80% floor as the root crate (dig_ecosystem CLAUDE.md
+      # §2.3). Measured here rather than on the platform matrix because ubuntu
+      # compiles ONLY the platform-independent half — the ladder and the tier
+      # reporting — which is precisely the half a floor should bind: the FFI
+      # error arms are unreachable without a malfunctioning TPM, and including
+      # them would set the floor by how broken the runner hardware is.
+      - name: Coverage for dig-keystore-hardware (gate >=80% lines)
+        run: cargo llvm-cov -p dig-keystore-hardware --fail-under-lines 80
 
       - name: Check documentation
         run: cargo doc --no-deps --all-features

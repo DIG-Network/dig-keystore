@@ -141,6 +141,7 @@ impl fmt::Debug for Rung {
 /// than downgrading "I could not tell" into "there is none".
 pub fn walk(candidates: &[Arc<dyn HardwareProvider>], policy: HardwarePolicy) -> Result<Rung> {
     let mut attempts = Vec::with_capacity(candidates.len());
+    let mut rejections: Vec<DegradeReason> = Vec::new();
     let mut selected: Option<(Arc<dyn HardwareProvider>, HardwareKind)> = None;
 
     for candidate in candidates {
@@ -165,20 +166,27 @@ pub fn walk(candidates: &[Arc<dyn HardwareProvider>], policy: HardwarePolicy) ->
                 });
                 selected = Some((Arc::clone(candidate), bound));
             }
-            Ok(ProtectionTier::Software(reason)) => attempts.push(Attempt {
-                kind,
-                outcome: AttemptOutcome::Rejected(reason),
-            }),
+            Ok(ProtectionTier::Software(reason)) => {
+                rejections.push(reason.clone());
+                attempts.push(Attempt {
+                    kind,
+                    outcome: AttemptOutcome::Rejected(reason),
+                });
+            }
             // `Optional` degrades rather than erroring, so this arm is reachable
             // only if that contract changes. Record it as an indeterminate
             // rejection — the conservative reading — rather than failing the
             // whole walk on one candidate.
-            Err(e) => attempts.push(Attempt {
-                kind,
-                outcome: AttemptOutcome::Rejected(DegradeReason::ProbeIndeterminate {
+            Err(e) => {
+                let reason = DegradeReason::ProbeIndeterminate {
                     detail: e.to_string(),
-                }),
-            }),
+                };
+                rejections.push(reason.clone());
+                attempts.push(Attempt {
+                    kind,
+                    outcome: AttemptOutcome::Rejected(reason),
+                });
+            }
         }
     }
 
@@ -189,7 +197,7 @@ pub fn walk(candidates: &[Arc<dyn HardwareProvider>], policy: HardwarePolicy) ->
             attempts,
         }),
         None => {
-            let tier = degrade_under(settled_reason(&attempts), policy)?;
+            let tier = degrade_under(settled_reason(&rejections), policy)?;
             Ok(Rung {
                 provider: None,
                 tier,
@@ -199,7 +207,12 @@ pub fn walk(candidates: &[Arc<dyn HardwareProvider>], policy: HardwarePolicy) ->
     }
 }
 
-/// Reduce every rejection to the ONE reason the ladder reports.
+/// Reduce a walk's rejection reasons to the ONE reason the ladder reports.
+///
+/// Takes the reasons rather than the [`Attempt`] list on purpose: `walk` calls this
+/// only when nothing was selected, so no attempt can be `Selected` or
+/// `NotReached` — a signature over attempts would carry two arms that cannot
+/// occur, and an unreachable arm is a branch no test can ever justify.
 ///
 /// The precedence is a fail-closed ordering, not a preference:
 ///
@@ -214,15 +227,12 @@ pub fn walk(candidates: &[Arc<dyn HardwareProvider>], policy: HardwarePolicy) ->
 ///    confident negative, reportable only when *every* candidate agreed on it.
 /// 4. No candidates at all is [`NotRequested`](DegradeReason::NotRequested) —
 ///    a different fact from "we looked and found none".
-fn settled_reason(attempts: &[Attempt]) -> DegradeReason {
+fn settled_reason(rejections: &[DegradeReason]) -> DegradeReason {
     let mut unusable: Option<&DegradeReason> = None;
     let mut unranked: Option<&DegradeReason> = None;
     let mut absent = false;
 
-    for attempt in attempts {
-        let AttemptOutcome::Rejected(reason) = &attempt.outcome else {
-            continue;
-        };
+    for reason in rejections {
         match reason {
             DegradeReason::ProbeIndeterminate { .. } => return reason.clone(),
             DegradeReason::HardwareUnusable { .. } => unusable = unusable.or(Some(reason)),
