@@ -1,0 +1,24 @@
+[package]
+name = "dig-keystore-hardware"
+version = "0.1.0"
+edition = "2021"
+description = "Platform trusted-component providers for dig-keystore: Windows TPM 2.0 via the CNG Platform Crypto Provider, Apple Secure Enclave, Linux TPM 2.0."
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/DIG-Network/dig-keystore"
+homepage = "https://github.com/DIG-Network/dig-keystore"
+documentation = "https://docs.rs/dig-keystore-hardware"
+readme = "README.md"
+keywords = ["dig-network", "keystore", "tpm", "secure-enclave", "cng"]
+categories = ["cryptography", "os"]
+
+include = ["src/**/*.rs", "Cargo.toml", "README.md", "LICENSE*"]
+
+[dependencies]
+dig-keystore = { version = "0.11.0", path = "..", default-features = false }
+zeroize = { version = "1.7", features = ["derive"] }
+
+[dev-dependencies]
+dig-keystore = { version = "0.11.0", path = "..", features = ["testing"] }
+
+[lints.rust]
+missing_docs = "warn"
