@@ -1105,6 +1105,21 @@ A caller MAY offer several candidate providers in preference order. Walking that
 5. Carry the settled reason into the constructed backend. Reducing it to `NotRequested`
    because no provider was ultimately selected reports "nobody asked" on a host that asked,
    looked, and found none.
+6. Apply the **caller's** policy to any later re-resolution of the SELECTED provider. Where an
+   implementation re-probes and re-runs the self-test so that one authority owns every hardware
+   claim (§17.2), that second resolution MUST NOT be given a weaker policy than the caller's.
+   It is an independent opportunity to fail — the self-test is a live operation against a
+   component that may have become contended since the walk — so a weaker policy makes it fail
+   **open**: `Required` would return success over a refuted self-test, and `Preferred` would
+   downgrade an uninspectable component into an absence. Applying the policy at both
+   resolutions is idempotent, because the walk has already refused every non-hardware settle
+   under a strict policy.
+
+The distinction between steps 2 and 6 is deliberate and is not a contradiction. Step 2 governs
+the per-candidate SCAN, where strictness would abandon a working candidate for an earlier
+one's failure. Step 6 governs the resolution of the candidate that WON, where permissiveness
+discards the caller's requirement. The permissive judgement is confined to choosing; the
+caller's policy governs every claim that reaches the caller.
 
 #### 17.5e Non-exportability is asserted, not declared (normative)
 
@@ -1116,6 +1131,22 @@ takes custody at its word.
 
 An export that **succeeds** is not a warning: the provider MUST then report `ProcessMemory`
 custody, which §17.2 rejects as a hardware tier.
+
+#### 17.5f Why `PlatformUnsupported` degrades where `ProbeIndeterminate` errors
+
+Both reasons describe something the implementation does not know, yet `Preferred` opens on the
+first and fails closed on the second. This is deliberate.
+
+`ProbeIndeterminate` is a **transient** property of one moment on one machine: the same host may
+be inspectable a second later, so degrading on it silently strips hardware protection from a
+machine that has it, and the resulting software blob then opens anywhere. `PlatformUnsupported`
+is a **deterministic** property of the build and platform. It cannot flicker, so it cannot
+transiently remove protection a host previously had — the host never had it in this build. A
+`Preferred` caller on such a platform has exactly one honest outcome available, and refusing to
+open would deny service permanently rather than fail closed against a real risk.
+
+`Required` MUST still refuse `PlatformUnsupported`, so a caller that genuinely needs hardware is
+never told a platform without a binding is good enough.
 
 ### 17.5a Binding is REVERSIBLE (normative)
 
@@ -1280,10 +1311,19 @@ it.
 | C-40 | A platform with no binding contributes no candidate and reports `PlatformUnsupported`, never `NoHardwarePresent` | §17.5 |
 | C-41 | The ladder selects the first proven candidate and probes none after it; the caller policy is applied once to a settled reason whose precedence ranks `ProbeIndeterminate` above every confident reason; that reason reaches the constructed backend rather than collapsing to `NotRequested` | §17.5d |
 | C-42 | A provider reports `NonExportable` only after the platform has refused a real export attempt; an export that succeeds demotes custody to `ProcessMemory` | §17.5e |
+| C-43 | The caller's policy governs EVERY resolution of the selected provider, including a re-resolution performed by the constructed backend; a permissive policy is confined to the per-candidate scan | §17.5d |
+| C-44 | `Required` refuses `PlatformUnsupported`; `Preferred` opens on it, because it is deterministic for a build and platform and cannot transiently strip protection | §17.5f |
+| C-45 | A recovered content key is held in memory that is wiped on drop, over the full allocated capacity, on every exit path including a wrong-length refusal | §12 |
 
 Test evidence: `src/hardware/tests.rs` (tier resolution, fail-closed policy, cross-device
 binding, envelope codec) and `tests/hardware_v1_compat.rs` (committed golden v1 blobs
 decrypted in every tier).
+
+C-43 is evidenced by `hardware/src/tests.rs`'s four-test policy set — two asserting refusal and
+two asserting binding, because a refusal-only set is equally satisfied by an implementation that
+refuses honest hardware. C-45 is a memory-hygiene property with no direct test: it is enforced by
+construction (`Zeroizing` from the point of allocation) rather than asserted, since observing
+freed heap from a test is not reliably possible.
 
 C-40..C-42 are evidenced in the `hardware/` member: `src/ladder/tests.rs` (precedence,
 fall-through, first-proven selection), `src/tests.rs` (the settled reason surviving the

@@ -42,6 +42,8 @@
 
 use std::fmt;
 
+use zeroize::{Zeroize, Zeroizing};
+
 use dig_keystore::hardware::{
     ContentKey, HardwareKind, HardwareProbe, HardwareProvider, KeyCustody, CONTENT_KEY_LEN,
 };
@@ -248,7 +250,12 @@ impl HardwareProvider for CngPlatformKeyProvider {
 
     fn wrap_key(&self, content_key: &ContentKey) -> Result<Vec<u8>> {
         let key = self.key()?;
+        // The wrapped key is ciphertext and is written into the envelope, so it
+        // is copied out of the zeroizing buffer deliberately. The buffer itself
+        // still wipes, because on this direction it also held the plaintext CNG
+        // was handed.
         oaep_transform(key, content_key.as_slice(), Direction::Encrypt)
+            .map(|wrapped| wrapped.to_vec())
             .map_err(|detail| KeystoreError::HardwareWrapFailed { detail })
     }
 
@@ -259,7 +266,7 @@ impl HardwareProvider for CngPlatformKeyProvider {
 
         // A wrong-length recovery is a refusal, not a content key. Reporting it
         // as one would hand `dig-keystore` bytes it would then use as an AES key.
-        let bytes: [u8; CONTENT_KEY_LEN] =
+        let mut bytes: [u8; CONTENT_KEY_LEN] =
             plain
                 .as_slice()
                 .try_into()
@@ -269,7 +276,12 @@ impl HardwareProvider for CngPlatformKeyProvider {
                         plain.len()
                     ),
                 })?;
-        Ok(ContentKey::new(bytes))
+
+        // `ContentKey` owns a copy from here on; this stack copy is wiped rather
+        // than left for the next frame to reuse. `plain` wipes itself on drop.
+        let content_key = ContentKey::new(bytes);
+        bytes.zeroize();
+        Ok(content_key)
     }
 }
 
@@ -293,7 +305,7 @@ fn oaep_transform(
     key: NCRYPT_KEY_HANDLE,
     input: &[u8],
     direction: Direction,
-) -> std::result::Result<Vec<u8>, String> {
+) -> std::result::Result<Zeroizing<Vec<u8>>, String> {
     let mut padding = BCRYPT_OAEP_PADDING_INFO {
         pszAlgId: BCRYPT_SHA256_ALGORITHM,
         pbLabel: std::ptr::null_mut(),
@@ -328,7 +340,15 @@ fn oaep_transform(
     }
     .map_err(|e| format!("CNG length query failed: {}", hresult(&e)))?;
 
-    let mut out = vec![0u8; needed as usize];
+    // `Zeroizing` from the point of allocation rather than at the call site: on
+    // the Decrypt direction this buffer holds the recovered CONTENT KEY, and the
+    // wrong-length branch below returns early without ever handing it out. Wiping
+    // it here covers every exit from this function, including that one.
+    //
+    // The wipe is over the full CAPACITY, not the truncated length — `written` is
+    // 32 of a ~256-byte RSA output buffer, so a length-only wipe would leave the
+    // tail of the plaintext block in freed heap.
+    let mut out = Zeroizing::new(vec![0u8; needed as usize]);
     let mut written: u32 = 0;
     // SAFETY: as above, with an output buffer of exactly the length CNG asked
     // for; CNG writes at most `out.len()` bytes and reports the count in
@@ -339,7 +359,7 @@ fn oaep_transform(
                 key,
                 Some(input),
                 Some(padding_ptr),
-                Some(&mut out),
+                Some(out.as_mut_slice()),
                 &mut written,
                 flags,
             ),
@@ -347,7 +367,7 @@ fn oaep_transform(
                 key,
                 Some(input),
                 Some(padding_ptr),
-                Some(&mut out),
+                Some(out.as_mut_slice()),
                 &mut written,
                 flags,
             ),

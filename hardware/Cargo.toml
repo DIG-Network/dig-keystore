@@ -26,7 +26,7 @@ include = [
 
 [dependencies]
 dig-keystore = { version = "0.12.0", path = "..", default-features = false }
-zeroize = { version = "1.7", features = ["derive"] }
+zeroize = "1.7"
 
 # Windows CNG (`ncrypt.dll`) bindings. Target-gated: nothing else in this crate
 # needs them, and a non-Windows build must not carry a Windows dependency.
