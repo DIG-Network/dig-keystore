@@ -128,14 +128,24 @@ pub fn bind_strongest_from<B: KeychainBackend>(
     let rung = ladder::walk(candidates, policy)?;
     let settled = rung.tier().degrade_reason().cloned();
     match rung.into_provider() {
-        // Re-resolved by the backend rather than asserted from here. The ladder
-        // has already self-tested this provider, so the second round-trip is
-        // redundant work on real hardware — but it keeps ONE authority for every
-        // `Hardware` claim in the system, and a claim asserted from outside that
-        // authority is exactly the kind nobody re-checks.
-        Some(provider) => {
-            HardwareBoundBackend::new(inner, Some(provider), HardwarePolicy::Optional)
-        }
+        // Re-resolved by the backend rather than asserted from here, so that ONE
+        // authority owns every `Hardware` claim in the system — a claim asserted
+        // from outside that authority is exactly the kind nobody re-checks.
+        //
+        // `policy` is passed through, and that is load-bearing rather than tidy.
+        // The second resolution re-probes and re-runs the wrap/unwrap self-test
+        // against LIVE hardware, so it is an independent chance to fail, not
+        // redundant work: a TPM contended by BitLocker, Credential Guard or
+        // Windows Hello can refuse the round-trip it had just passed. Handing
+        // that resolution a weaker policy than the caller's would let it fail
+        // OPEN — `Required` would return `Ok` over a refuted self-test, and
+        // `Preferred` would downgrade an uninspectable device into an absence,
+        // which is precisely the outcome `degrade_under` exists to refuse.
+        //
+        // Applying the policy twice is idempotent: `walk` has already errored
+        // under `Required` on every non-hardware settle, so this only closes the
+        // second resolution's hole.
+        Some(provider) => HardwareBoundBackend::new(inner, Some(provider), policy),
         // The ladder already applied `policy` and established the reason; carry
         // that reason through instead of letting the backend re-derive a
         // caller-shaped `NotRequested` from the missing provider.
