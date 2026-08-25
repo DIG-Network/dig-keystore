@@ -11,11 +11,12 @@
 //! uses: encrypt-to-bytes / decrypt-from-bytes helpers; unit tests; doc
 //! examples.
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
 use parking_lot::Mutex;
 
-use crate::backend::{BackendKey, KeychainBackend};
+use crate::backend::{BackendKey, Exclusivity, KeychainBackend};
 use crate::error::{KeystoreError, Result};
 
 /// A keychain backend that lives entirely in process memory.
@@ -54,6 +55,25 @@ impl KeychainBackend for MemoryBackend {
         Ok(())
     }
 
+    /// Establish `key` only if vacant, decided under the map's own lock.
+    ///
+    /// The `Entry` API is what makes this exclusive rather than best-effort:
+    /// the vacancy check and the insert happen in one critical section, so two
+    /// threads cannot both observe absence and both write.
+    fn write_new(&self, key: &BackendKey, data: &[u8]) -> Result<()> {
+        match self.inner.lock().entry(key.clone()) {
+            Entry::Occupied(_) => Err(KeystoreError::AlreadyExists(key.as_str().to_string())),
+            Entry::Vacant(slot) => {
+                slot.insert(data.to_vec());
+                Ok(())
+            }
+        }
+    }
+
+    fn write_new_exclusivity(&self) -> Exclusivity {
+        Exclusivity::Atomic
+    }
+
     fn delete(&self, key: &BackendKey) -> Result<()> {
         self.inner.lock().remove(key);
         Ok(())
@@ -77,6 +97,85 @@ impl KeychainBackend for MemoryBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Proves:** `MemoryBackend::write_new` establishes a vacant key, refuses
+    /// an occupied one with `AlreadyExists`, and leaves the occupant's bytes
+    /// untouched — while `write` beside it still replaces.
+    ///
+    /// **Why it matters:** `MemoryBackend` is the scratch backend production
+    /// adapters reach for, and it claims `Exclusivity::Atomic`. A `write_new`
+    /// that replaced would break the claim silently.
+    ///
+    /// **Catches:** an `insert`-based implementation (which replaces), and an
+    /// inverted occupied/vacant branch.
+    #[test]
+    fn write_new_establishes_once_and_then_refuses() {
+        let be = MemoryBackend::new();
+        let key = BackendKey::new("coupled");
+
+        be.write_new(&key, b"established").unwrap();
+        let err = be.write_new(&key, b"usurper").unwrap_err();
+
+        assert!(
+            matches!(err, KeystoreError::AlreadyExists(ref k) if k == "coupled"),
+            "the collision must be adoptable: {err:?}"
+        );
+        assert_eq!(be.read(&key).unwrap(), b"established");
+
+        be.write(&key, b"replaced").unwrap();
+        assert_eq!(be.read(&key).unwrap(), b"replaced");
+    }
+
+    /// **Proves:** exactly one of many concurrent `write_new` calls wins.
+    ///
+    /// **Why it matters:** this is the mechanism behind the `Atomic` claim.
+    /// The sequential test above is satisfied identically by a check-then-write,
+    /// so on its own it pins a coincidence rather than the property a consumer
+    /// with coupled records actually relies on.
+    ///
+    /// **Catches:** a `write_new` that takes the lock twice — once to check and
+    /// once to insert — instead of deciding inside one critical section.
+    #[test]
+    fn only_one_concurrent_write_new_can_win() {
+        use std::sync::{Arc, Barrier};
+
+        const RACERS: usize = 16;
+        let be = Arc::new(MemoryBackend::new());
+        let key = BackendKey::new("contended");
+        let gate = Arc::new(Barrier::new(RACERS));
+
+        let winners = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..RACERS)
+                .map(|i| {
+                    let (be, gate, key) = (Arc::clone(&be), Arc::clone(&gate), key.clone());
+                    scope.spawn(move || {
+                        gate.wait();
+                        be.write_new(&key, &[i as u8; 8]).is_ok()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .filter(|won| *won)
+                .count()
+        });
+
+        assert_eq!(winners, 1, "exactly one racer may establish; {winners} did");
+    }
+
+    /// **Proves:** `MemoryBackend` claims atomic exclusivity.
+    ///
+    /// **Why it matters:** the claim is what a consumer reads before relying on
+    /// `write_new`; the test above is what makes the claim true. Both are
+    /// asserted so the claim cannot outlive the mechanism.
+    #[test]
+    fn memory_backend_claims_exclusive_creation() {
+        assert_eq!(
+            MemoryBackend::new().write_new_exclusivity(),
+            Exclusivity::Atomic
+        );
+    }
 
     /// **Proves:** `MemoryBackend` satisfies the [`KeychainBackend`]
     /// contract end-to-end — write then read recovers the blob; `exists`

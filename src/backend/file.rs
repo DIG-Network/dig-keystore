@@ -61,7 +61,7 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::backend::{BackendKey, KeychainBackend};
+use crate::backend::{BackendKey, Exclusivity, KeychainBackend};
 use crate::error::{KeystoreError, Result};
 
 /// File extension for keystore blobs. Stands for "DIG KeyStore".
@@ -412,9 +412,102 @@ impl KeychainBackend for FileBackend {
         Ok(out)
     }
 
-    /// Cheap override — `Path::exists` stats without opening the file.
+    /// Stat the path without opening it, preserving the trait's three-valued
+    /// contract: present, confidently absent, or **could not determine**.
+    ///
+    /// Uses `symlink_metadata` rather than `Path::exists()` or `try_exists()`.
+    /// `Path::exists()` maps every error to `false`, which turns an
+    /// inspection failure into a confident negative — and the caller uses that
+    /// answer to decide whether to mint over a `write` that replaces.
+    ///
+    /// `symlink_metadata` is also the stricter of the two honest options: it
+    /// does not follow links, so a **dangling symlink** at the key path counts
+    /// as present. Something occupies that name; refusing to write over it is
+    /// the fail-closed reading, whereas `try_exists()` would report `false` and
+    /// invite exactly the overwrite this method exists to prevent.
     fn exists(&self, key: &BackendKey) -> Result<bool> {
-        Ok(self.path_for(key).exists())
+        match fs::symlink_metadata(self.path_for(key)) {
+            Ok(_) => Ok(true),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Establish `<root>/<key>.dks` **only if it does not already exist**.
+    ///
+    /// Exclusivity comes from the OS: the file is opened with `create_new`, so
+    /// exactly one racer creates it and every other gets
+    /// [`KeystoreError::AlreadyExists`] — a distinguishable error the loser can
+    /// adopt on, rather than a generic I/O failure it can only give up on.
+    ///
+    /// # Why this does not use tmp + rename
+    ///
+    /// `rename` always replaces, so it cannot express "only if absent"; the two
+    /// guarantees are not simultaneously available without a hard link, which
+    /// not every filesystem supports. Exclusivity is the one that matters here,
+    /// and the cost is bounded: a crash mid-write leaves a **short file**, which
+    /// the format's magic, length and CRC all detect on the next read
+    /// (`SPEC.md` §3.2), and which is repaired by deleting it and retrying. The
+    /// state this method exists to prevent — a coupled pair that settled
+    /// mismatched — is neither detectable nor repairable. A best-effort unlink
+    /// removes the partial file on the way out of any failure.
+    fn write_new(&self, key: &BackendKey, data: &[u8]) -> Result<()> {
+        self.ensure_root()?;
+        let path = self.path_for(key);
+
+        // `create_owner_only` is the same exclusive, born-owner-only open the
+        // tmp-file path uses: `create_new(true)` plus the requested mode, so
+        // the file never exists under a permissive mode and a symlink planted
+        // on the path is refused rather than followed.
+        let f = match create_owner_only(&path) {
+            Ok(f) => f,
+            Err(KeystoreError::Backend(e)) if e.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(KeystoreError::AlreadyExists(key.as_str().to_string()))
+            }
+            Err(e) => return Err(e),
+        };
+
+        // Stage the bytes with the handle owned by a closure, so it is closed
+        // by leaving scope. An explicit `drop(f)` would say the same thing on
+        // every native target and trip `clippy::drop_non_drop` on wasm32, where
+        // `std::fs::File` is a stub that does not implement `Drop` — and the
+        // close is load-bearing, because Windows cannot unlink an open file.
+        // Same shape as `write`, for the same reason.
+        let staged = (|mut f: fs::File| -> Result<()> {
+            // The mode is verified, not merely requested: a `chmod` on a
+            // filesystem without POSIX modes reports success and changes
+            // nothing, so the file is removed below rather than filled with key
+            // material it cannot protect. Same floor and reasoning as `write`.
+            enforce_owner_only(&path, 0o600)?;
+            f.write_all(data)?;
+            f.sync_all()?;
+            Ok(())
+        })(f);
+
+        if let Err(e) = staged {
+            // Only reachable once THIS call created the file — an
+            // `AlreadyExists` returned above, so a losing racer never reaches
+            // here and can never unlink the winner's blob.
+            let _ = fs::remove_file(&path);
+            return Err(e);
+        }
+
+        // fsync the containing directory on Unix so the creation is durable
+        // across a crash, matching `write`. Not a concept on Windows.
+        #[cfg(unix)]
+        {
+            if let Ok(dir) = fs::File::open(&self.root) {
+                let _ = dir.sync_all();
+            }
+        }
+
+        Ok(())
+    }
+
+    /// `create_new(true)` is an atomic create-if-absent at the OS level, so two
+    /// concurrent calls cannot both succeed.
+    fn write_new_exclusivity(&self) -> Exclusivity {
+        Exclusivity::Atomic
     }
 }
 
@@ -442,7 +535,302 @@ fn fastrand_suffix() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::KeystoreError;
     use tempfile::TempDir;
+    /// A key whose name carries an interior NUL byte. Every OS path API
+    /// rejects it with `InvalidInput` — never `NotFound` — so it is a
+    /// deterministic, cross-platform way to make a `stat` **fail to answer**
+    /// rather than answer "absent".
+    ///
+    /// It is the vehicle, not the property. The property is that an
+    /// undeterminable read refuses; the realistic vehicles (an unreadable
+    /// parent directory, a failing mount, an I/O fault) are not portably
+    /// constructible in a unit test, and one of them is covered by
+    /// `exists_refuses_when_the_parent_cannot_be_read` below.
+    fn undeterminable_key() -> BackendKey {
+        let mut name = String::from("un");
+        name.push('\u{0}');
+        name.push_str("determinable");
+        BackendKey::new(name)
+    }
+
+    /// **Proves:** `FileBackend::exists` returns `Err` — not `Ok(false)` —
+    /// when the filesystem could not answer whether the blob is there.
+    ///
+    /// **Why it matters:** `exists` is a two-valued answer to a three-valued
+    /// question, and its one production caller (`Keystore::create_with_rng`,
+    /// `src/custody/keystore.rs`) uses it to decide whether to MINT.
+    /// `FileBackend::write` is replace-semantics tmp+rename, so a spurious
+    /// `false` does not merely mint a duplicate beside the original — it
+    /// **overwrites the original**. Once the blob is hardware-wrapped
+    /// (`SPEC.md` §17) that overwrite is unrecoverable, and
+    /// `HardwareUnwrapFailed` structurally cannot name its own cause
+    /// (§17.5b), so the loss is silent as well as permanent.
+    ///
+    /// **Catches:** exactly the implementation this replaced —
+    /// `Ok(self.path_for(key).exists())`. `Path::exists()` maps *every* error
+    /// to `false`, so it returns `Ok(false)` for this fixture and this
+    /// assertion fails. Also catches any future "cheap override" that maps a
+    /// non-`NotFound` error to absent.
+    #[test]
+    fn exists_refuses_rather_than_reporting_absent_when_it_cannot_tell() {
+        let dir = TempDir::new().unwrap();
+        let be = FileBackend::new(dir.path().to_path_buf());
+
+        // Control: the same backend answers a *determinable* absence honestly,
+        // so the test cannot pass by refusing everything.
+        assert!(
+            !be.exists(&BackendKey::new("genuinely-absent")).unwrap(),
+            "a determinable absence must still be reported as absent"
+        );
+
+        let err = be
+            .exists(&undeterminable_key())
+            .expect_err("an unanswerable stat must not be reported as absent");
+        assert!(
+            matches!(err, KeystoreError::Backend(_)),
+            "the refusal must carry the underlying I/O cause"
+        );
+    }
+
+    /// **Proves:** the refusal reaches the mint decision — a write is not
+    /// attempted, and nothing is half-created, when the read could not answer.
+    ///
+    /// **Why it matters:** this is the *placement* half. The assertion above
+    /// pins the backend's contract; a guard added in `Keystore::create`
+    /// instead would leave every other present and future `exists` caller
+    /// minting on a false absence. Both the seam and its effect are observed,
+    /// so the fix cannot be relocated without a test noticing.
+    ///
+    /// **Catches:** an `exists` override that answers `Ok(false)` here, which
+    /// would let the write proceed.
+    #[test]
+    fn an_unanswerable_read_does_not_reach_a_write() {
+        let dir = TempDir::new().unwrap();
+        let be = FileBackend::new(dir.path().to_path_buf());
+        let key = undeterminable_key();
+
+        assert!(be.exists(&key).is_err());
+        // And the write itself refuses too, rather than half-creating anything.
+        assert!(be.write(&key, b"payload").is_err());
+        assert!(
+            be.list("").unwrap().is_empty(),
+            "a refused write must leave no residue"
+        );
+    }
+
+    /// **Proves:** a parent directory the process cannot read makes `exists`
+    /// refuse, rather than report absent.
+    ///
+    /// **Why it matters:** this is the *realistic* vehicle for the same
+    /// property — a keystore root whose permissions changed under a running
+    /// service. The NUL-key test above proves the branch; this one proves the
+    /// branch is reached by a situation that actually happens.
+    ///
+    /// **Unix only.** Windows has no equivalent portable construction: mode
+    /// bits do not apply, and denying access needs an explicit DACL, which
+    /// needs Win32 FFI this crate cannot contain (`unsafe_code = "forbid"`,
+    /// §13.2 C-15). On Windows this test is not compiled in and the property
+    /// rests on the test above. It is exercised by the Linux and macOS CI legs;
+    /// a Windows developer cannot run it locally.
+    #[cfg(unix)]
+    #[test]
+    fn exists_refuses_when_the_parent_cannot_be_read() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("locked");
+        fs::create_dir(&root).unwrap();
+        let be = FileBackend::new(root.clone());
+        let key = BackendKey::new("sealed");
+        be.write(&key, b"payload").unwrap();
+
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o000)).unwrap();
+        let answer = be.exists(&key);
+        // Restore before asserting so a failure cannot leave an unremovable dir.
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+
+        // Root defeats permission bits entirely, so the fixture cannot make the
+        // stat fail there. Rather than skip — which would print `ok` while
+        // asserting nothing, and go unfalsifiable on any root CI runner — each
+        // environment asserts the outcome it can actually exhibit. Neither
+        // branch is vacuous, and neither is `Ok(false)`, which is the answer
+        // this method must never give.
+        if running_as_root() {
+            assert!(
+                answer.unwrap(),
+                "root can read the directory, so the blob must be reported present"
+            );
+        } else {
+            assert!(
+                answer.is_err(),
+                "an unreadable parent must refuse, not report the blob absent"
+            );
+        }
+    }
+
+    /// Whether this process can read a `0o000` directory — i.e. is effectively
+    /// root. Probed by observation rather than `libc::geteuid`, because the
+    /// crate forbids `unsafe` and the observable is the thing we actually care
+    /// about.
+    #[cfg(unix)]
+    fn running_as_root() -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        let probe = TempDir::new().unwrap();
+        let d = probe.path().join("probe");
+        fs::create_dir(&d).unwrap();
+        fs::set_permissions(&d, fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = fs::read_dir(&d).is_ok();
+        fs::set_permissions(&d, fs::Permissions::from_mode(0o700)).unwrap();
+        readable
+    }
+
+    /// **Proves:** `write_new` refuses an existing key with a distinguishable
+    /// `AlreadyExists`, and leaves the stored bytes untouched.
+    ///
+    /// **Why it matters:** a consumer storing two COUPLED records — a wrapped
+    /// blob and the device key that opens it — needs to say "I am
+    /// *establishing* this, not updating it" (dig-keystore#16). With only
+    /// replace-semantics `write`, two concurrent starts settle key `D_B`
+    /// beside blob `B_A`, which never self-heals. `create_new` +
+    /// adopt-on-`AlreadyExists` makes that state unreachable rather than
+    /// unlikely.
+    ///
+    /// **Catches:** a `write_new` implemented as `exists()` then `write()`,
+    /// which would replace the bytes; and one that reports the collision as a
+    /// generic I/O error, which a caller cannot adopt on.
+    #[test]
+    fn write_new_refuses_an_existing_key_without_touching_it() {
+        let dir = TempDir::new().unwrap();
+        let be = FileBackend::new(dir.path().to_path_buf());
+        let key = BackendKey::new("coupled");
+
+        be.write_new(&key, b"established").unwrap();
+        let err = be
+            .write_new(&key, b"usurper")
+            .expect_err("write_new must refuse an established key");
+
+        assert!(
+            matches!(err, KeystoreError::AlreadyExists(ref k) if k == "coupled"),
+            "the collision must be adoptable, not a generic I/O error: {err:?}"
+        );
+        assert_eq!(
+            be.read(&key).unwrap(),
+            b"established",
+            "a refused write_new must not replace the established bytes"
+        );
+    }
+
+    /// **Proves:** `write_new` on an absent key stores bytes `read` recovers,
+    /// and the `write` beside it still replaces.
+    ///
+    /// **Why it matters:** the control for the test above. A `write_new` that
+    /// refused unconditionally would satisfy the refusal assertion perfectly
+    /// while being useless, and no other test would notice.
+    ///
+    /// **Catches:** a `write_new` that never writes, writes to a different
+    /// path than `write`/`read` use, or that accidentally makes `write`
+    /// exclusive too.
+    #[test]
+    fn write_new_establishes_an_absent_key() {
+        let dir = TempDir::new().unwrap();
+        let be = FileBackend::new(dir.path().to_path_buf());
+        let key = BackendKey::new("fresh");
+
+        be.write_new(&key, b"payload").unwrap();
+        assert_eq!(be.read(&key).unwrap(), b"payload");
+        be.write(&key, b"replaced").unwrap();
+        assert_eq!(be.read(&key).unwrap(), b"replaced");
+    }
+
+    /// **Proves:** `FileBackend` claims exclusive `write_new`.
+    ///
+    /// **Why it matters:** [`Exclusivity`] is what a consumer reads to decide
+    /// whether `write_new` can be *relied on* to make a coupled mismatch
+    /// unreachable. A backend that overstates it hands back the exact race the
+    /// method exists to remove.
+    ///
+    /// **Catches:** a `FileBackend` that keeps the `Atomic` claim after being
+    /// reimplemented as a check-then-write.
+    #[test]
+    fn file_backend_claims_exclusive_creation() {
+        let dir = TempDir::new().unwrap();
+        let be = FileBackend::new(dir.path().to_path_buf());
+        assert_eq!(be.write_new_exclusivity(), Exclusivity::Atomic);
+    }
+
+    /// **Proves:** under contention, exactly ONE `write_new` establishes the key
+    /// and every other racer gets `AlreadyExists` — the mechanism behind the
+    /// [`Exclusivity::Atomic`] claim, not merely the claim.
+    ///
+    /// **Why it matters:** `write_new_refuses_an_existing_key_without_touching_it`
+    /// above is satisfied identically by a check-then-write, so on its own it
+    /// pins a coincidence. The whole value of `write_new` to a consumer with
+    /// coupled records is that two concurrent *starts* cannot both establish;
+    /// that is a property of concurrency and nothing sequential can observe it.
+    ///
+    /// **Catches:** a `write_new` reimplemented as `exists()` then `write()`.
+    /// Every thread would pass the vacancy check inside the barrier window and
+    /// several would report success.
+    ///
+    /// **One-directional, deliberately.** A correct implementation can *never*
+    /// produce two winners, so this test cannot fail spuriously. A broken one
+    /// is caught probabilistically — the barrier maximises the overlap, but a
+    /// single unlucky scheduling could still serialise the threads. It is a
+    /// sound proof of the negative and a strong-but-not-certain detector of the
+    /// positive, which is the right way round.
+    #[test]
+    fn only_one_concurrent_write_new_can_win() {
+        use std::sync::{Arc, Barrier};
+
+        const RACERS: usize = 16;
+
+        let dir = TempDir::new().unwrap();
+        // Create the root up front so the race is over the blob, not over
+        // `ensure_root`, which would serialise the threads before they reach
+        // the interesting call.
+        let be = Arc::new(FileBackend::new(dir.path().to_path_buf()));
+        be.write(&BackendKey::new("warmup"), b"x").unwrap();
+
+        let key = BackendKey::new("contended");
+        let gate = Arc::new(Barrier::new(RACERS));
+
+        let winners: usize = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..RACERS)
+                .map(|i| {
+                    let (be, gate, key) = (Arc::clone(&be), Arc::clone(&gate), key.clone());
+                    scope.spawn(move || {
+                        // Each racer writes a distinguishable payload, so the
+                        // survivor identifies which one won.
+                        let payload = [i as u8; 8];
+                        gate.wait();
+                        be.write_new(&key, &payload).is_ok()
+                    })
+                })
+                .collect();
+            // `join` consumes the handle, so map-then-filter rather than
+            // `filter(|h| h.join()..)`. `unwrap` is deliberate: a panicking
+            // racer must fail this test, not be counted as a loser.
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .filter(|won| *won)
+                .count()
+        });
+
+        assert_eq!(
+            winners, 1,
+            "exactly one racer may establish a key; {winners} did"
+        );
+        // The stored bytes are one racer's payload in full — never a blend of
+        // two, which is what a torn concurrent write would leave.
+        let stored = be.read(&key).unwrap();
+        assert_eq!(stored.len(), 8);
+        assert!(
+            stored.iter().all(|b| *b == stored[0]),
+            "the survivor's payload must be intact, not a mix of two writers"
+        );
+    }
 
     /// **Proves:** `FileBackend::write` followed by `FileBackend::read`
     /// recovers the same bytes.

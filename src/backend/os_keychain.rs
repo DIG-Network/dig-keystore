@@ -70,7 +70,7 @@
 //! of truth — the index only powers `list`, so index/store drift can never
 //! corrupt a read or a write, only stale a listing.
 
-use crate::backend::{BackendKey, KeychainBackend};
+use crate::backend::{BackendKey, Exclusivity, KeychainBackend};
 use crate::error::{KeystoreError, Result};
 
 use parking_lot::Mutex;
@@ -262,6 +262,34 @@ impl KeychainBackend for OsKeychainBackend {
         Ok(())
     }
 
+    /// Establish `key` only if the credential store has nothing under it.
+    ///
+    /// **Best-effort, and reported as such.** The OS credential-store APIs on
+    /// both Windows and macOS expose get and set, with no create-if-absent
+    /// primitive to build on, so the vacancy check and the write are two
+    /// separate calls and two concurrent racers can both pass the check.
+    ///
+    /// That is a limitation of the store, not a shortcut taken here, which is
+    /// exactly why [`write_new_exclusivity`](KeychainBackend::write_new_exclusivity)
+    /// exists: a consumer relying on `write_new` to make a coupled-record
+    /// mismatch *unreachable* must read that answer and use a different
+    /// backend for the shared record. Claiming atomicity we cannot deliver
+    /// would hand back the very race the method exists to remove.
+    fn write_new(&self, key: &BackendKey, data: &[u8]) -> Result<()> {
+        validate_key_name(key.as_str())?;
+        if self.store.get(key.as_str())?.is_some() {
+            return Err(KeystoreError::AlreadyExists(key.as_str().to_string()));
+        }
+        self.write(key, data)
+    }
+
+    /// [`Exclusivity::BestEffort`] — see [`write_new`](Self::write_new). This
+    /// is the trait default, restated explicitly so the answer is a decision on
+    /// the record rather than an omission.
+    fn write_new_exclusivity(&self) -> Exclusivity {
+        Exclusivity::BestEffort
+    }
+
     fn delete(&self, key: &BackendKey) -> Result<()> {
         self.store.remove(key.as_str())?;
         self.index_remove(key.as_str());
@@ -450,6 +478,64 @@ mod tests {
     use super::test_support::{fake_backend as backend, fake_backend_seeded, sealed, FakeStore};
     use super::*;
     use std::collections::HashMap;
+
+    /// **Proves:** `OsKeychainBackend::write_new` establishes a vacant key and
+    /// refuses an occupied one with the adoptable `AlreadyExists`, without
+    /// disturbing the occupant — and that it reports its exclusivity as
+    /// `BestEffort` rather than overstating it.
+    ///
+    /// **Why it matters:** the credential-store APIs on both platforms offer
+    /// get and set with no create-if-absent primitive, so the vacancy check and
+    /// the write are two calls and two racers can both pass the check. The
+    /// method is still useful — it expresses *establish, not update* — but a
+    /// consumer relying on it to make a coupled mismatch **unreachable**
+    /// (`SPEC.md` §10.2a) must read the exclusivity answer and use a different
+    /// backend. Claiming `Atomic` here would hand that consumer back the exact
+    /// race it was avoiding.
+    ///
+    /// **Catches:** a `write_new` that replaces the occupant; one that reports
+    /// the collision as a generic store error; and — the load-bearing half — an
+    /// exclusivity claim upgraded to `Atomic` without the primitive to back it.
+    #[test]
+    fn write_new_establishes_then_refuses_and_does_not_claim_atomicity() {
+        let be = backend();
+        let key = BackendKey::new("coupled");
+
+        be.write_new(&key, b"established").unwrap();
+        let err = be.write_new(&key, b"usurper").unwrap_err();
+
+        assert!(
+            matches!(err, KeystoreError::AlreadyExists(ref k) if k == "coupled"),
+            "the collision must be adoptable: {err:?}"
+        );
+        assert_eq!(be.read(&key).unwrap(), b"established");
+        assert_eq!(
+            be.write_new_exclusivity(),
+            Exclusivity::BestEffort,
+            "the OS credential store offers no create-if-absent primitive, so \
+             atomicity must not be claimed"
+        );
+    }
+
+    /// **Proves:** `write_new` applies the same key-name validation `write`
+    /// does.
+    ///
+    /// **Why it matters:** `write_new` is a second entry point into the same
+    /// store. A guard enforced on only one of two doors is not enforced — the
+    /// reserved index name and the newline injection `write` rejects would be
+    /// reachable through `write_new` instead.
+    ///
+    /// **Catches:** a `write_new` that omits `validate_key_name`.
+    #[test]
+    fn write_new_rejects_the_names_write_rejects() {
+        let be = backend();
+        for bad in [INDEX_ACCOUNT, "has\nnewline"] {
+            assert!(
+                be.write_new(&BackendKey::new(bad), b"x").is_err(),
+                "write_new must reject {bad:?} exactly as write does"
+            );
+        }
+    }
 
     /// **Proves:** a blob written through `OsKeychainBackend` reads back
     /// byte-identical.
