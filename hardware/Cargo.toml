@@ -17,6 +17,14 @@ include = ["src/**/*.rs", "Cargo.toml", "README.md", "LICENSE*"]
 dig-keystore = { version = "0.11.0", path = "..", default-features = false }
 zeroize = { version = "1.7", features = ["derive"] }
 
+# Windows CNG (`ncrypt.dll`) bindings. Target-gated: nothing else in this crate
+# needs them, and a non-Windows build must not carry a Windows dependency.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+] }
+
 [dev-dependencies]
 dig-keystore = { version = "0.11.0", path = "..", features = ["testing"] }
 

@@ -51,7 +51,7 @@ include = [
 # `crate::opaque` module (arbitrary-length password-sealed secrets) — see
 # `src/opaque.rs` and `wasm/src/lib.rs`.
 [workspace]
-members = ["wasm"]
+members = ["wasm", "hardware"]
 default-members = ["."]
 
 [dependencies]
