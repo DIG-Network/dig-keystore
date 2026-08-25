@@ -106,7 +106,7 @@ pub use backend::FileBackend;
 pub use backend::MemoryBackend;
 #[cfg(feature = "os-keychain")]
 pub use backend::OsKeychainBackend;
-pub use backend::{BackendKey, KeychainBackend};
+pub use backend::{BackendKey, Exclusivity, KeychainBackend};
 
 pub use error::{KeystoreError, Result};
 pub use format::{CipherId, KdfId, KdfParams, KeystoreHeader, FORMAT_VERSION_V1};

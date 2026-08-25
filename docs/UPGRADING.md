@@ -8,6 +8,61 @@ git-cliff on every release (`--output CHANGELOG.md`, `release.yml`), so a note a
 there by hand is overwritten by the next release; the changelog header links here
 instead.
 
+## 0.11.0
+
+### `KeychainBackend` gains a required `write_new`
+
+Any type implementing `KeychainBackend` must now also implement:
+
+```rust
+fn write_new(&self, key: &BackendKey, data: &[u8]) -> Result<()>;
+```
+
+There is deliberately **no default implementation**. A default composed of `exists`
+then `write` would present the create-if-absent contract while providing none of it,
+and every backend that forgot to override it would inherit the race silently — which is
+exactly the failure this method exists to remove.
+
+**What to do.** If your store offers a create-if-absent primitive, use it and override
+`write_new_exclusivity` to return `Exclusivity::Atomic`. If it does not, a vacancy check
+followed by a write is a correct implementation; leave `write_new_exclusivity` at its
+`BestEffort` default, which is the honest answer. Report a pre-existing record as
+`KeystoreError::AlreadyExists(key)` either way, so a losing racer can adopt the winner
+rather than only give up.
+
+Every backend shipped by this crate implements it already. No caller of `Keystore`,
+`opaque`, or a shipped backend needs any change.
+
+### `FileBackend::exists` now returns `Err` where it used to return `Ok(false)`
+
+Through 0.10.0 the implementation was `Ok(self.path_for(key).exists())`.
+`Path::exists()` maps **every** error to `false` — an unreadable parent directory, a
+failing mount, an I/O fault — so an inspection failure was reported as a confident
+absence.
+
+That answer decides whether to **mint**. `Keystore::create` refuses to overwrite only
+because `exists` says the key is there, and `FileBackend::write` replaces, so a spurious
+`false` did not create a harmless duplicate beside the original — it **destroyed the
+original**. Where the blob is hardware-wrapped (`SPEC.md` §17) the destruction is
+unrecoverable, and `HardwareUnwrapFailed` structurally cannot name its own cause
+(§17.5b), so the loss is silent as well as permanent.
+
+0.11.0 stats with `symlink_metadata` and preserves the trait's three-valued contract:
+present, confidently absent, or **could not determine**.
+
+**What this costs.** Two behaviour changes, both in the fail-closed direction:
+
+- A call that could not determine presence now returns `KeystoreError::Backend` instead
+  of `Ok(false)`. A caller that treated `exists` as infallible via `unwrap_or(false)`
+  reinstates the old hazard and should be changed to propagate.
+- A **dangling symlink** at the key path now counts as **present**. Something occupies
+  that name; refusing to write over it is the fail-closed reading. `Path::try_exists()`
+  would report it absent, which is why it is not used either.
+
+If you genuinely want the old permissive behaviour for read-only inspection tooling,
+call `exists(..).unwrap_or(false)` at that call site explicitly — where it is visible —
+rather than having every caller inherit it.
+
 ## 0.9.0
 
 ### `FileBackend::write` now refuses a root whose permissions it cannot verify

@@ -1578,6 +1578,9 @@ fn unbind_refuses_to_report_success_when_the_store_kept_the_envelope() {
         fn write(&self, _key: &BackendKey, _data: &[u8]) -> crate::Result<()> {
             Ok(()) // accepted, never stored
         }
+        fn write_new(&self, _key: &BackendKey, _data: &[u8]) -> crate::Result<()> {
+            Ok(()) // same lie, for the establish path
+        }
         fn delete(&self, key: &BackendKey) -> crate::Result<()> {
             self.0.delete(key)
         }
@@ -1878,4 +1881,56 @@ fn a_foreign_device_and_a_cleared_device_are_indistinguishable_from_the_error() 
         ),
         "a host with no provider must report NotHardwareBound (C-34)"
     );
+}
+
+/// **Proves:** `HardwareBoundBackend::write_new` seals into a hardware
+/// envelope, exactly as `write` does — and that a blob established through it
+/// reads back to the original plaintext.
+///
+/// **Why it matters:** `write_new` is a second door into the same storage, and
+/// the two doors must produce the same shape. A `write_new` that forwarded raw
+/// bytes to the inner backend would establish a record that is *not*
+/// hardware-bound while every tier report said the host was — the
+/// overstated-protection failure this module exists to prevent. It is
+/// especially easy to get wrong here because forwarding is the correct
+/// behaviour for `read`, `delete`, `list` and `exists`, so the delegating shape
+/// looks right.
+///
+/// **Catches:** `self.inner.write_new(key, data)` without the `wrap_blob` step.
+/// The stored bytes would carry no `DIGHW1` prefix, and `blob_tier` would say
+/// so.
+#[test]
+fn write_new_seals_into_an_envelope_just_as_write_does() {
+    let key = BackendKey::new("established");
+    let blob = v1_shaped_blob(0x5A);
+    let device = FakeDevice::working(HardwareKind::LinuxTpm20, 0x33);
+    let inner = Arc::new(MemoryBackend::default());
+
+    let be = HardwareBoundBackend::with_inner(
+        inner.clone(),
+        Some(Arc::new(device)),
+        HardwarePolicy::Preferred,
+    )
+    .expect("a working device resolves to the hardware tier");
+    assert!(be.tier().is_hardware_bound());
+
+    be.write_new(&key, &blob).unwrap();
+
+    // The bytes that actually landed are wrapped, not the plaintext.
+    let raw = inner.read(&key).unwrap();
+    assert!(
+        envelope::is_envelope(&raw),
+        "write_new must seal, not forward the plaintext"
+    );
+    assert_ne!(raw, blob);
+
+    // And the per-blob tier — the answer a user-facing surface reads — agrees.
+    assert!(be.blob_tier(&key).unwrap().is_hardware_bound());
+    assert_eq!(be.read(&key).unwrap(), blob);
+
+    // Establishing twice refuses, and the refusal is the inner backend's, so
+    // the exclusivity claim is inherited rather than invented.
+    let err = be.write_new(&key, &blob).unwrap_err();
+    assert!(matches!(err, KeystoreError::AlreadyExists(_)), "{err:?}");
+    assert_eq!(be.write_new_exclusivity(), inner.write_new_exclusivity());
 }

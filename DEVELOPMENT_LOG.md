@@ -233,3 +233,44 @@ A second test in the same file, `magic_bytes_are_ascii`, declared its own
 private `Magic` trait holding `DIGVK1`/`DIGLW1` and asserted those literals
 against themselves — never reading `KeyScheme::MAGIC`. Both sides of an
 assertion coming from the same place proves only that `==` works.
+
+## `Path::exists()` cannot implement a presence check that decides whether to mint
+
+`FileBackend::exists` was `Ok(self.path_for(key).exists())` from the first release until
+0.11.0. It reads as an obvious optimisation over the trait's default — stat instead of
+open — and it is wrong in a way that only shows up under a second condition.
+
+`Path::exists()` maps **every** error to `false`. Not just `NotFound`: an unreadable
+parent, a failing mount, an I/O fault, a path the OS rejects. So it converts "I could not
+tell" into "there is definitely nothing there" — the same two-valued-answer-to-a-
+three-valued-question defect the `hardware` module's `HardwareProbe::Absent` vs
+`Indeterminate` split exists to avoid, sitting one directory away and unnoticed.
+
+**The second condition is what makes it expensive.** `Keystore::create` calls `exists` to
+decide whether to mint, and `FileBackend::write` is replace-semantics tmp+rename. So a
+spurious `false` does not produce a harmless duplicate beside the original — it
+**overwrites the original**. Adding at-rest protection then converts that from
+recoverable to permanent: a hardware-wrapped blob that is overwritten is gone, and
+`HardwareUnwrapFailed` (§17.5b) structurally cannot name its own cause, so nobody can even
+diagnose it afterwards.
+
+**The generalisable lesson: adding at-rest protection obliges re-auditing every read that
+decides whether to MINT.** The sealing change itself is not where the bug is. Sealing
+raises the cost of an *already-existing* misread from "duplicate beside a recoverable
+original" to "the only copy is gone", without touching the misread. dig-node PR #342 hit
+the same shape from the other direction and fixed it structurally — `create_new` plus
+adopt-on-`AlreadyExists`, so the bad state is unreachable rather than unlikely — which is
+what `write_new` now offers here.
+
+Two things worth keeping:
+
+- **`Path::try_exists()` is honest about errors but still not the right primitive here.**
+  It follows symlinks, so a **dangling symlink** at the key path reports `false` and
+  invites the overwrite. `symlink_metadata` counts it as present, which is the fail-closed
+  reading: something occupies that name.
+- **A sequential "refuses an existing key" test does not prove exclusivity.** Measured on
+  this branch: replacing `write_new`'s `create_new` with a check-then-write left
+  `write_new_refuses_an_existing_key_without_touching_it` **passing**, while the
+  16-thread contention test reported **16 winners**. Exclusivity is a property of
+  concurrency, and nothing sequential can observe it.
+

@@ -23,7 +23,7 @@ use std::sync::Arc;
 use super::envelope::{self, Envelope};
 use super::provider::{ContentKey, HardwareProvider};
 use super::tier::{DegradeReason, HardwareKind, HardwarePolicy, HardwareProbe, ProtectionTier};
-use crate::backend::{BackendKey, KeychainBackend};
+use crate::backend::{BackendKey, Exclusivity, KeychainBackend};
 use crate::error::{KeystoreError, Result};
 
 /// A [`KeychainBackend`] that hardware-binds every blob it stores, degrading to
@@ -477,6 +477,27 @@ impl KeychainBackend for HardwareBoundBackend {
             }
             None => self.inner.write(key, data),
         }
+    }
+
+    /// Establish a blob, sealing it into a hardware envelope first when a
+    /// provider is in use — the same transformation [`write`](Self::write)
+    /// applies, so a record established here and one written there are the same
+    /// shape.
+    ///
+    /// Exclusivity is entirely the inner backend's, and so is the reported
+    /// claim: wrapping changes the bytes, never who wins a race for the name.
+    fn write_new(&self, key: &BackendKey, data: &[u8]) -> Result<()> {
+        match self.provider.as_deref() {
+            Some(provider) => {
+                let sealed = self.wrap_blob(provider, data)?;
+                self.inner.write_new(key, &sealed)
+            }
+            None => self.inner.write_new(key, data),
+        }
+    }
+
+    fn write_new_exclusivity(&self) -> Exclusivity {
+        self.inner.write_new_exclusivity()
     }
 
     fn delete(&self, key: &BackendKey) -> Result<()> {

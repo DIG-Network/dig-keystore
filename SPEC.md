@@ -399,6 +399,8 @@ pub trait KeychainBackend: Send + Sync + 'static {
     fn delete(&self, key: &BackendKey) -> Result<()>;
     fn list(&self, prefix: &str) -> Result<Vec<BackendKey>>;
     fn exists(&self, key: &BackendKey) -> Result<bool> { /* default via read */ }
+    fn write_new(&self, key: &BackendKey, data: &[u8]) -> Result<()>;
+    fn write_new_exclusivity(&self) -> Exclusivity { Exclusivity::BestEffort }
 }
 ```
 
@@ -408,12 +410,61 @@ Implementations MUST satisfy:
   `std::io::Error` of kind `NotFound`. This exact shape is load-bearing: the default
   `exists` and `Keystore::create`'s overwrite guard branch on it. (`Ok(true)` when a
   read succeeds; `Ok(false)` on `NotFound`; any other error propagates.)
+- **`exists` is THREE-valued and MUST NOT be collapsed to two (MUST).** `Ok(true)` is
+  present, `Ok(false)` is a **confident** absence, and `Err` is **could not determine**.
+  An implementation MUST return `Err` when the store could not answer — an unreadable
+  parent, a failing mount, an I/O fault — and MUST NOT report such a case as absent.
+  A cheaper override inherits this obligation; in particular Rust's `Path::exists()`
+  does **not** satisfy it, because it maps every error to `false`.
+
+  The reason is what the answer decides. `Keystore::create` uses `exists` to choose
+  whether to **mint**, and `write` replaces, so a spurious `false` does not create a
+  harmless duplicate beside the original — it **destroys the original**. Where the blob
+  is hardware-wrapped (§17) that destruction is unrecoverable and the resulting error
+  cannot name its own cause (§17.5b). Refusing on an unanswerable read is the only
+  fail-closed choice.
 - **`write` is atomic**: a concurrent reader observes either the old bytes or the new
   bytes in full — never a torn mix. Overwriting an existing key replaces it.
+- **`write_new` establishes, never updates.** It MUST store `data` only if nothing is
+  stored at `key`, and MUST report a pre-existing record as
+  `KeystoreError::AlreadyExists(key)` — distinguishable from an I/O error, so a losing
+  racer can **adopt** the record that won rather than only give up. A failed `write_new`
+  MUST leave any existing bytes byte-identical. There is deliberately **no default
+  implementation**: a default composed of `exists` then `write` would present this
+  contract while providing none of it.
+- **`write_new_exclusivity` MUST NOT overstate.** `Exclusivity::Atomic` asserts that the
+  underlying store creates-if-absent in one indivisible step, so two concurrent
+  `write_new` calls cannot both succeed. `Exclusivity::BestEffort` says the backend checks
+  then writes. The default is `BestEffort`, so a backend that has not considered the
+  question understates rather than overstates.
 - **`delete` is idempotent**: deleting an absent key succeeds. Implementations SHOULD
   best-effort overwrite storage before removal.
 - **`list(prefix)`** returns keys whose names **start with** `prefix` (strict prefix,
   not substring); order unspecified; empty prefix lists all.
+
+#### 10.2a Coupled records (normative)
+
+Two records are **coupled** when neither is useful without the other: a wrapped blob and
+the device key that opens it, a sealed secret and its salt, a payload and its integrity
+sidecar.
+
+Written with replace-semantics `write` and no ordering primitive, two concurrent starts
+can settle **device key `D_B` beside blob `B_A`** — a key that does not open the blob next
+to it. A well-behaved consumer also refuses to re-mint an identity it already has, and
+those two individually-correct decisions compose into a state that **can never
+self-heal**: the consumer is permanently unable to open its own data, and restarting does
+not help.
+
+A consumer storing coupled records **MUST** establish the shared record with `write_new`
+and **adopt on `AlreadyExists`**, so exactly one racer creates it and every other seals
+under the record that won. The mismatch becomes unreachable rather than unlikely. It
+**MUST** first read `write_new_exclusivity`: on a `BestEffort` backend the reasoning does
+not hold and the shared record belongs on an `Atomic` one.
+
+Preventing the state matters more than reporting it, because the resulting error
+**structurally cannot name its own cause**: once hardware binding is in play a mismatch
+surfaces as `HardwareUnwrapFailed`, which §17.5b establishes cannot distinguish a blob
+copied to another machine from a device whose key was wiped.
 
 ### 10.3 `FileBackend` (feature `file-backend`, on by default)
 
@@ -435,6 +486,25 @@ Implementations MUST satisfy:
   path whose mode cannot be corrected. Repair is sound only because the mode is
   re-read afterwards; a backend that repairs without verifying has the pre-0.9.0
   defect this clause exists to close.
+- **Presence (normative):** `exists` MUST stat the path with a link-preserving stat and
+  MUST distinguish `NotFound` (`Ok(false)`) from every other error (`Err`), per §10.2.
+  A **dangling symlink** at the key path counts as **present**: something occupies that
+  name, and refusing to write over it is the fail-closed reading. `Path::exists()` and
+  `Path::try_exists()` both fail this clause — the first maps every error to `false`, the
+  second follows the link and reports a dangling one as absent.
+- **Exclusive create (normative):** `write_new` MUST open the final path with
+  `create_new`, so exclusivity is the OS's and not a check this backend performs, and
+  MUST report the resulting `AlreadyExists` as `KeystoreError::AlreadyExists`.
+  `write_new_exclusivity` is therefore `Atomic`.
+
+  It deliberately does **not** use tmp + rename: `rename` always replaces, so it cannot
+  express "only if absent", and the two guarantees are not simultaneously available
+  without a hard link that not every filesystem supports. Exclusivity is the one that
+  matters, and the cost is bounded — a crash mid-write leaves a **short file**, which the
+  §3.2 decode detects and which is repaired by deleting and retrying, whereas a coupled
+  pair that settled mismatched (§10.2a) is neither detectable nor repairable. The blob is
+  born owner-only and the mode is verified before any bytes are written, exactly as in
+  `write`, and any failure MUST unlink the partial file.
 - **Root identity (normative):** the backend MUST inspect the root with a
   link-preserving stat (`lstat`) and MUST fail with `UnsafeRoot` if the configured
   root is a symbolic link, or exists as anything other than a directory. It MUST NOT
@@ -475,6 +545,9 @@ uses: **scratch backend** for encrypt-to-bytes/decrypt-from-bytes adapters (nota
 tests, and doc examples. It MUST NOT be used as durable storage — process exit drops
 all state. It satisfies the full §10.2 contract, including the `NotFound` error shape.
 
+`write_new` decides vacancy and inserts inside the map's own lock (the `Entry` API), so
+its `write_new_exclusivity` is `Atomic`.
+
 ### 10.5 `OsKeychainBackend` (feature `os-keychain`, Windows/macOS only)
 
 `OsKeychainBackend` stores each blob in the host OS credential store — Windows Credential
@@ -483,6 +556,12 @@ access-control primitive**.
 
 - The crate's Argon2id + AES-256-GCM sealing (§3–§5) MUST remain the primary access control
   for anything stored here; the OS credential store is defence-in-depth **only**.
+- **`write_new` is `BestEffort`, not `Atomic` (normative).** The Windows and macOS
+  credential-store APIs expose get and set with no create-if-absent primitive, so the
+  vacancy check and the write are separate calls and two concurrent racers can both pass
+  the check. This is a limitation of the store rather than a shortcut, and it is reported
+  rather than hidden: a consumer relying on `write_new` to make a coupled-record mismatch
+  *unreachable* (§10.2a) MUST place the shared record on an `Atomic` backend.
 - Callers MUST NOT write an unlock password, passphrase, mnemonic, raw seed, or any other
   plaintext secret to this backend; only blobs this crate has already sealed belong here.
   This is a **caller obligation**. The backend is a byte-blob KV store and does not
@@ -587,7 +666,7 @@ Root re-exports (crate `dig-keystore`, importable as `dig_keystore`):
 - `Password` — §9.
 - `Keystore<K>` (§7), `SignerHandle<K>` (§8), `KeyScheme` and
   `scheme::{BlsSigning, L1WalletBls}` (§6) — all require feature `custody`, §18.
-- `KeychainBackend`, `BackendKey`, `MemoryBackend`; `FileBackend` (feature
+- `KeychainBackend`, `BackendKey`, `Exclusivity`, `MemoryBackend`; `FileBackend` (feature
   `file-backend`); `OsKeychainBackend` (feature `os-keychain`) — §10.
 - `KeystoreHeader`, `KdfParams`, `KdfId`, `CipherId`, `FORMAT_VERSION_V1` — §3–4.
 - `KeystoreError`, `Result` — §11.
@@ -1083,6 +1162,49 @@ binding.
   and using it overstates the protection of an older blob.
 
 
+### 17.5c What MUST NOT be sealed under the account secret (normative)
+
+Hardware binding is the right answer for the **seed** and the **machine key**. It is the
+wrong answer for a **second authentication factor**, and the difference is a matter of
+custody rather than strength.
+
+A second factor's whole value is that compromising the first does not yield it. Sealing a
+TOTP secret — or any second-factor material — under the **account password** puts both
+factors behind **one secret**: an attacker who has the password has both, and the factor
+becomes cosmetic while still being reported as a factor. Wrapping that envelope in
+hardware raises the bar for an offline attacker without changing this at all, because the
+password still opens it on the machine where it is used.
+
+Therefore:
+
+- A second-factor secret **MUST NOT** be sealed under the account password, in this crate
+  or any other, whether or not the resulting blob is hardware-bound.
+- It belongs under an unlock secret **independent of the account password** — a
+  **sealed** container whose key the account password does not yield. Where a future
+  design places that container in this crate, the independent unlock secret **MUST** be
+  stated normatively at that point; silence is not an acceptable answer, because the
+  resulting blob is indistinguishable from a correctly-separated one.
+- **Different custody does NOT mean unsealed (MUST).** The OS-native credential store is a
+  permitted *location* for such a container and **MUST NOT** be used as a substitute for
+  sealing it. §10.5 governs and is not relaxed here: that store is a **storage location,
+  not an access-control primitive**, a caller **MUST NOT** write any plaintext secret to
+  it, and on Windows an entry is readable by **any process running as that user** and
+  roams with the profile under `CRED_PERSIST_ENTERPRISE`.
+
+  Read as permission to store the factor *unsealed*, this clause would be **strictly worse
+  than the defect it prevents**: a secret readable today only by someone holding the
+  account password becomes readable by any same-user process, with no password at all, on
+  every machine the profile roams to. Separation of custody is the requirement; it is
+  satisfied by an independent unlock secret, and never by relocation alone.
+- The instinct this rule exists to interrupt is the natural reading of "bind at-rest
+  secrets to hardware" as "seal everything with dig-keystore". For this one class of
+  secret, stronger custody of the **same** secret is a regression, not a hardening win.
+
+This crate cannot enforce the rule — `opaque` seals arbitrary bytes and has no way to
+know what it was handed (the same limitation §17.5b records for recovery seeds). The
+obligation therefore sits with the caller, and is stated here so no caller has to infer
+it.
+
 ### 17.6 Conformance additions
 
 | # | Requirement | Spec |
@@ -1101,6 +1223,10 @@ binding.
 | C-34 | The three refusal errors are produced by the paths §17.5b describes: no provider on the host yields `NotHardwareBound`, a different hardware class yields `HardwareKindMismatch`, and a right-class provider that refuses yields `HardwareUnwrapFailed` | §17.5b |
 | C-35 | A foreign device and a cleared device both yield `HardwareUnwrapFailed`, so the error alone does not distinguish a recoverable copy from a permanent loss | §17.5b |
 | C-29 | `OsKeychainBackend::open` returns `None` on Linux/wasm and the crate performs no fallback | §10.5 |
+| C-36 | **Caller obligation** (this crate cannot enforce it — `opaque` seals arbitrary bytes and cannot know what it was handed). A second-factor secret is not sealed under the account password, and is separated by an **independent unlock secret** rather than by relocation to an unsealed store | §17.5c |
+| C-37 | `exists` returns `Err`, never `Ok(false)`, when the store could not determine presence — so an unanswerable read never authorises a mint over a replacing `write` | §10.2 |
+| C-38 | `write_new` establishes only into a vacant key, reports a collision as the adoptable `AlreadyExists`, and leaves existing bytes byte-identical | §10.2 |
+| C-39 | `write_new_exclusivity` reports `Atomic` only where the store creates-if-absent indivisibly; the default is `BestEffort` so silence understates | §10.2, §10.2a |
 
 Test evidence: `src/hardware/tests.rs` (tier resolution, fail-closed policy, cross-device
 binding, envelope codec) and `tests/hardware_v1_compat.rs` (committed golden v1 blobs
