@@ -8,6 +8,11 @@ Behaviour changes that need action on upgrade are recorded in
 [docs/UPGRADING.md](docs/UPGRADING.md).
 
 
+## [0.12.0] - 2026-08-25
+
+### Features
+- **hardware:** Platform trusted-component providers — Windows CNG TPM 2.0 and the degrade ladder (#20)
+
 ## [0.11.0] - 2026-08-25
 
 ### Features
