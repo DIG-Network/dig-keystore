@@ -444,7 +444,7 @@ dependencies = [
 
 [[package]]
 name = "dig-keystore"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -466,9 +466,13 @@ dependencies = [
 
 [[package]]
 name = "dig-keystore-hardware"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+ "core-foundation 0.10.1",
+ "core-foundation-sys",
  "dig-keystore",
+ "security-framework-sys",
+ "tempfile",
  "windows",
  "zeroize",
 ]

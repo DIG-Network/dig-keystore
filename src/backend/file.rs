@@ -347,7 +347,9 @@ impl KeychainBackend for FileBackend {
     /// Best-effort secure delete, then unlink.
     ///
     /// Steps:
-    /// 1. No-op if file does not exist (idempotent).
+    /// 1. No-op if the file is **confidently absent** (idempotent); refuses if
+    ///    its presence could not be determined, rather than reporting a
+    ///    completed erase over a blob that may still be there.
     /// 2. Open the file for writing; overwrite with zeros in 4 KiB chunks.
     /// 3. `fsync` the overwritten file so zeros hit storage.
     /// 4. `unlink` the file.
@@ -358,8 +360,18 @@ impl KeychainBackend for FileBackend {
     /// stronger guarantees.
     fn delete(&self, key: &BackendKey) -> Result<()> {
         let path = self.path_for(key);
-        if !path.exists() {
-            return Ok(());
+        // Three-valued, exactly as `exists` — an absent blob is an idempotent
+        // success, but a blob whose presence could not be DETERMINED is a
+        // refusal. `Path::exists()` collapses those, so an unreadable parent
+        // used to report a completed secure-erase over key material still on
+        // disk (`SPEC.md` §10.2).
+        match fs::symlink_metadata(&path) {
+            // Present. A dangling symlink lands here too, and is unlinked
+            // below: something occupies the name, and removing it is what the
+            // caller asked for.
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
         }
 
         if let Ok(metadata) = fs::metadata(&path) {
@@ -389,10 +401,18 @@ impl KeychainBackend for FileBackend {
     /// - has a non-UTF-8 name
     /// - does not start with `prefix`
     ///
-    /// Returns an empty vec if the root directory does not exist.
+    /// Returns an empty vec if the root directory is **confidently absent**, and
+    /// an error if it could not be inspected at all — the same three-valued
+    /// contract [`exists`](Self::exists) keeps, for the same reason.
     fn list(&self, prefix: &str) -> Result<Vec<BackendKey>> {
-        if !self.root.exists() {
-            return Ok(Vec::new());
+        // An absent root is a legitimate empty result — no keystore has been
+        // created yet. A root that could not be INSPECTED is not: reporting it
+        // as empty tells a caller enumerating identities that the user has no
+        // keys, when the truth is that we could not look (`SPEC.md` §10.2).
+        match fs::symlink_metadata(&self.root) {
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
         }
         let mut out = Vec::new();
         for entry in fs::read_dir(&self.root)? {
@@ -917,6 +937,146 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let be = FileBackend::new(dir.path().to_path_buf());
         be.delete(&BackendKey::new("never_existed")).unwrap();
+    }
+
+    /// **Proves:** `delete` returns `Err` — not `Ok(())` — when the filesystem
+    /// could not answer whether the blob is there.
+    ///
+    /// **Why it matters:** `delete` is this crate's secure-erase path, so its
+    /// `Ok(())` is read as *the key material is gone*. `Path::exists()` maps
+    /// every error to `false`, so an unreadable parent or a failing mount made
+    /// `delete` take the early "already absent" return and report success over a
+    /// blob still sitting on disk. That is a false assurance about residual key
+    /// material — a lie about custody rather than a loss of it, which is why
+    /// this is the lower-severity half of the same defect class as `exists`
+    /// (#18/#19), and still not something this crate is willing to say.
+    ///
+    /// **Catches:** exactly the implementation this replaced —
+    /// `if !path.exists() { return Ok(()); }`. Under it this fixture returns
+    /// `Ok(())` and the assertion fails.
+    ///
+    /// **The control is load-bearing:** a `delete` that simply refused
+    /// everything would satisfy the first assertion, and would break the
+    /// documented idempotence the second one pins.
+    #[test]
+    fn delete_refuses_rather_than_reporting_success_when_it_cannot_tell() {
+        let dir = TempDir::new().unwrap();
+        let be = FileBackend::new(dir.path().to_path_buf());
+
+        // Control: a determinable absence is still an idempotent success.
+        be.delete(&BackendKey::new("genuinely-absent"))
+            .expect("a determinable absence must still delete Ok");
+
+        let err = be
+            .delete(&undeterminable_key())
+            .expect_err("an unanswerable stat must not be reported as a completed delete");
+        assert!(
+            matches!(err, KeystoreError::Backend(_)),
+            "the refusal must carry the underlying I/O cause"
+        );
+    }
+
+    /// **Proves:** `list` distinguishes a root that is genuinely absent (a
+    /// legitimate empty result) from a root it could not inspect (an error).
+    ///
+    /// **Why it matters:** a caller enumerating a user's identities acts on an
+    /// empty vec — it offers to create a first keystore, or reports "you have no
+    /// keys". `Path::exists()` collapsed "there is no root yet" and "I could not
+    /// read the root" into the same answer, so a permissions change under a
+    /// running service presented as a user with nothing in it.
+    ///
+    /// **Catches:** exactly the implementation this replaced —
+    /// `if !self.root.exists() { return Ok(Vec::new()); }`. Under it the
+    /// undeterminable root returns `Ok(vec![])` and the third assertion fails.
+    ///
+    /// **Both controls are load-bearing**, and they are different from each
+    /// other: an absent root must stay `Ok(vec![])` (the legitimate empty this
+    /// fix must not turn into an error), and a present, genuinely empty root
+    /// must also stay `Ok(vec![])` (so the fix cannot pass by refusing every
+    /// root that holds no keys).
+    #[test]
+    fn list_separates_an_absent_root_from_an_uninspectable_one() {
+        let dir = TempDir::new().unwrap();
+
+        // Control 1: root does not exist yet. A legitimate empty.
+        let absent_root = FileBackend::new(dir.path().join("not-created-yet"));
+        assert!(
+            absent_root.list("").unwrap().is_empty(),
+            "a root that is genuinely absent must still list as empty"
+        );
+
+        // Control 2: root exists and holds no keys. Also a legitimate empty.
+        let empty_root = FileBackend::new(dir.path().to_path_buf());
+        assert!(
+            empty_root.list("").unwrap().is_empty(),
+            "an existing empty root must still list as empty"
+        );
+
+        // The property: a root that cannot be inspected is not an empty root.
+        let unreadable_root = FileBackend::new(PathBuf::from("un\u{0}determinable"));
+        let err = unreadable_root
+            .list("")
+            .expect_err("an uninspectable root must not be reported as holding no keys");
+        assert!(
+            matches!(err, KeystoreError::Backend(_)),
+            "the refusal must carry the underlying I/O cause"
+        );
+    }
+
+    /// **Proves:** a root whose parent the process cannot read makes both
+    /// `delete` and `list` refuse, rather than report a completed delete and an
+    /// empty keystore.
+    ///
+    /// **Why it matters:** this is the *realistic* vehicle for the property the
+    /// two tests above prove with an interior-NUL path — a keystore directory
+    /// whose permissions changed under a running service. The parent is locked
+    /// rather than the root itself, because a `0o000` root still *stats*
+    /// successfully from its readable parent; it is the stat that must be made
+    /// to fail, not the directory read.
+    ///
+    /// **Unix only**, for the same reason as
+    /// `exists_refuses_when_the_parent_cannot_be_read`: Windows needs an
+    /// explicit DACL, which needs Win32 FFI this crate cannot contain
+    /// (`unsafe_code = "forbid"`, §13.2 C-15).
+    #[cfg(unix)]
+    #[test]
+    fn delete_and_list_refuse_when_the_root_cannot_be_stat_ed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let parent = dir.path().join("locked-parent");
+        fs::create_dir(&parent).unwrap();
+        let root = parent.join("keys");
+        let be = FileBackend::new(root.clone());
+        let key = BackendKey::new("sealed");
+        be.write(&key, b"payload").unwrap();
+
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o000)).unwrap();
+        let listed = be.list("");
+        let deleted = be.delete(&key);
+        // Restore before asserting so a failure cannot leave an unremovable dir.
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+
+        // Root defeats permission bits entirely, so each environment asserts the
+        // outcome it can actually exhibit — neither branch is vacuous, and in
+        // neither is the answer the silent success this test exists to forbid.
+        if running_as_root() {
+            assert_eq!(
+                listed.unwrap().len(),
+                1,
+                "root can read the parent, so the blob must be enumerated"
+            );
+            deleted.expect("root can read the parent, so the delete must complete");
+        } else {
+            assert!(
+                listed.is_err(),
+                "an uninspectable root must refuse, not report an empty keystore"
+            );
+            assert!(
+                deleted.is_err(),
+                "an uninspectable blob must refuse, not report a completed delete"
+            );
+        }
     }
 
     /// **Proves:** `list("alph")` returns exactly `["alpha", "alpha2"]`

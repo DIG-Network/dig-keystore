@@ -104,12 +104,32 @@ jobs:
 
       # Gated at the same >=80% floor as the root crate (dig_ecosystem CLAUDE.md
       # §2.3). Measured here rather than on the platform matrix because ubuntu
-      # compiles ONLY the platform-independent half — the ladder and the tier
-      # reporting — which is precisely the half a floor should bind: the FFI
-      # error arms are unreachable without a malfunctioning TPM, and including
-      # them would set the floor by how broken the runner hardware is.
+      # compiles ONLY the platform-independent half — the ladder, the tier
+      # reporting, the probe classification and the TPM command codec — which is
+      # precisely the half a floor should bind: a device-conversation arm is
+      # unreachable without working (or malfunctioning) hardware, and including
+      # one would set the floor by what the runner happens to have in it.
+      #
+      # The three excluded files are exactly the device conversations. Two of
+      # them, `windows.rs` and `macos.rs`, were already excluded here by simply
+      # not compiling off their platforms; `linux/session.rs` is named because
+      # the Linux binding is pure `std` and therefore DOES compile everywhere,
+      # which is deliberate — it is what lets its refusal arms be tested on every
+      # host rather than on one CI leg. Excluding it from the FLOOR keeps that
+      # choice from importing unreachable lines into the gate.
+      #
+      # What stays inside the floor is the part that decides what happens on a
+      # machine with no trusted component, which is almost every machine:
+      # `platform/linux.rs` (probe classification), `platform/tpm2.rs` (the
+      # command codec, testable byte-for-byte on any host), `platform/content_key.rs`,
+      # `ladder.rs`, `lib.rs` and `platform.rs`. Every excluded file is still
+      # compiled, clippied with `-D warnings`, and has its reachable arms tested
+      # on every leg of the matrix below.
       - name: Coverage for dig-keystore-hardware (gate >=80% lines)
-        run: cargo llvm-cov -p dig-keystore-hardware --fail-under-lines 80
+        run: |
+          cargo llvm-cov -p dig-keystore-hardware \
+            --ignore-filename-regex 'platform.(windows|macos).rs|linux.session.rs' \
+            --fail-under-lines 80
 
       - name: Check documentation
         run: cargo doc --no-deps --all-features
@@ -138,7 +158,12 @@ jobs:
       # first question, and fail-fast answers it for only one of them.
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        # ubuntu is here for the Linux TPM provider, not for the root crate:
+        # `default-members = ["."]` means the ubuntu `test` job above never
+        # builds `hardware/` at all, so without this entry the Linux arm of
+        # `platform::candidates` and the `unsupported_reason` agreement test
+        # would ship having been compiled by nothing.
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

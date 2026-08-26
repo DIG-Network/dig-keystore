@@ -1,6 +1,6 @@
 [package]
 name = "dig-keystore-hardware"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Platform trusted-component providers for dig-keystore: Windows TPM 2.0 via the CNG Platform Crypto Provider, Apple Secure Enclave, Linux TPM 2.0."
 license = "Apache-2.0 OR MIT"
@@ -25,7 +25,7 @@ include = [
 ]
 
 [dependencies]
-dig-keystore = { version = "0.12.0", path = "..", default-features = false }
+dig-keystore = { version = "0.13.0", path = "..", default-features = false }
 zeroize = "1.7"
 
 # Windows CNG (`ncrypt.dll`) bindings. Target-gated: nothing else in this crate
@@ -36,8 +36,25 @@ windows = { version = "0.62", features = [
     "Win32_Security_Cryptography",
 ] }
 
+# Apple Security framework bindings for the Secure Enclave provider.
+# Target-gated for the same reason the Windows dependency is: nothing else in
+# this crate needs them, and a non-Apple build must not carry them. Both crates
+# are pure Rust `#[link]` declarations with no C toolchain, so a non-Apple host
+# can still `cargo check --target aarch64-apple-darwin` this module.
+#
+# `OSX_10_15` is required for `kSecUseDataProtectionKeychain`, which a Secure
+# Enclave key on macOS needs; it sets the platform floor at macOS 10.15 (2019).
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+core-foundation-sys = "0.8"
+security-framework-sys = { version = "2.17", features = ["OSX_10_15"] }
+
 [dev-dependencies]
-dig-keystore = { version = "0.12.0", path = "..", features = ["testing"] }
+dig-keystore = { version = "0.13.0", path = "..", features = ["testing"] }
+# The Linux provider tests drive the sysfs enumeration and the device open with
+# REAL directories rather than a stand-in device, so they need somewhere
+# disposable to build one.
+tempfile = "3"
 
 [lints.rust]
 missing_docs = "warn"
