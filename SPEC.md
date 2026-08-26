@@ -288,8 +288,21 @@ delete(self)              ──► blob removed from backend
 ### 7.1 `create` / `create_with_rng`
 
 - If a blob already exists at the key, `create` MUST fail with `AlreadyExists` —
-  it never silently overwrites an existing key. (The existence probe treats a
-  backend `NotFound` read error as "absent"; any other backend error propagates.)
+  it never silently overwrites an existing key.
+- **The refusal MUST be carried by a single `write_new` (normative).** `create`
+  MUST NOT probe for existence and then write: the seal between the two calls is
+  an Argon2id derivation, and two racers that both observe an absence both write,
+  with the loser's blob replacing the winner's. `write_new` makes that state
+  unreachable rather than unlikely. Consequently the strength of the guarantee is
+  exactly the backend's `write_new_exclusivity`:
+  - On an `Atomic` backend (`FileBackend`, `MemoryBackend`) concurrent mints of
+    the same key MUST resolve to exactly one winner, every loser receiving
+    `AlreadyExists`.
+  - On a `BestEffort` backend (`OsKeychainBackend`, whose credential store has no
+    create-if-absent primitive) a residual race REMAINS and is not closed by this
+    clause. `create` does not refuse to mint there — refusing would make the OS
+    credential store unable to hold a keystore at all — so a caller minting
+    concurrently against one MUST serialise the mint itself.
 - If `plaintext` is supplied, its length MUST equal `K::SECRET_LEN`
   (`InvalidPlaintext` otherwise). If `None`, a fresh secret is generated via
   `K::generate` with `OsRng` (or the supplied RNG in `_with_rng`).
@@ -522,14 +535,24 @@ copied to another machine from a device whose key was wiped.
   the tmp file is best-effort unlinked. The tmp-name random suffix is
   non-cryptographic (time × golden-ratio-prime + pid) and exists only to disambiguate
   concurrent writers.
-- **Delete:** no-op if absent; otherwise best-effort single-pass zero-overwrite (4 KiB
-  chunks) + `fsync`, then unlink. The zero pass is explicitly best-effort — SSD FTLs
-  and CoW filesystems may retain old sectors; operators needing stronger guarantees
-  MUST use full-disk encryption.
-- **List:** scans the root (empty result if the root does not exist), skipping
-  non-`.dks` and non-UTF-8 names, returning the extension-stripped stems matching the
-  prefix.
-- **Exists:** cheap `stat`-based override.
+- **Delete (normative):** the presence read MUST use the same link-preserving stat
+  as `exists`, and MUST distinguish `NotFound` (an idempotent `Ok(())`) from every
+  other error (`Err`). `Path::exists()` fails this clause: `delete` is the
+  secure-erase path, so an `Ok(())` derived from an unanswerable stat is a false
+  assurance that key material is gone. Otherwise: best-effort single-pass
+  zero-overwrite (4 KiB chunks) + `fsync`, then unlink. The zero pass is explicitly
+  best-effort — SSD FTLs and CoW filesystems may retain old sectors; operators
+  needing stronger guarantees MUST use full-disk encryption.
+- **List (normative):** the root presence read MUST use the same link-preserving
+  stat. A root that is **confidently absent** (`NotFound`) MUST list as `Ok([])` —
+  a keystore that has not been created yet is legitimately empty — and a root that
+  could not be inspected MUST be `Err`, never an empty result: an empty vec is what
+  a caller enumerating identities acts on, and "you have no keys" and "I could not
+  look" are different statements. Otherwise scans the root, skipping non-`.dks` and
+  non-UTF-8 names, returning the extension-stripped stems matching the prefix.
+- **Exists:** `lstat`-based override, per the Presence clause above. "Cheap" MUST
+  NOT be read as licence for `Path::exists()`; every presence read in this backend
+  is three-valued.
 - Windows: `std::fs::rename` (`MoveFileExW` + `MOVEFILE_REPLACE_EXISTING`) provides
   old-or-new (never torn) semantics; Unix file permissions do not apply and NTFS ACL
   inheritance governs access. The crate does NOT narrow that inheritance: an explicit
@@ -1068,8 +1091,41 @@ Provider availability, per platform:
 | Platform | Binding | Status |
 |---|---|---|
 | Windows | TPM 2.0 via the CNG **Microsoft Platform Crypto Provider** | implemented |
-| macOS | Secure Enclave (`kSecAttrTokenIDSecureEnclave`) | not implemented |
-| Linux | TPM 2.0 / TEE-backed Secret Service | not implemented |
+| macOS, `aarch64` | Secure Enclave (`kSecAttrTokenIDSecureEnclave`), P-256 + ECIES | implemented |
+| macOS, `x86_64` | — | not implemented; T2 presence is not determinable |
+| Linux | TPM 2.0 primary key over the kernel resource manager (`/dev/tpmrm0`) | implemented |
+
+**Probe classification (normative, every provider).** A provider MUST sort each way it can
+fail into exactly one of two answers, by this rule:
+
+> the host was inspected and offers no trusted component **this process can use** →
+> `Absent`; the inspection itself could not complete or could not be believed →
+> `Indeterminate`.
+
+Both halves are load-bearing. Reporting an inspected non-usability — a TPM device node owned
+by a group this process is not in, a binary carrying no Secure Enclave entitlement — as
+`Indeterminate` makes an ordinary host fail closed under any policy stricter than `Optional`
+and unable to open its own keystore, when the correct outcome is a degrade to a fully sealed
+software blob. Reporting an inability to inspect as `Absent` is the confident lie about the
+machine that the clause below forbids.
+
+**Custody MUST be recorded from a refusal, never from a request (normative).** A provider
+claims `NonExportable` only after the platform has refused a real export attempt:
+`SecKeyCopyExternalRepresentation` of the private key on macOS; on Linux **both**
+`TPM2_ReadPublic` reporting `fixedTPM | fixedParent` in the device's own description of the
+key **and** `TPM2_Duplicate` being refused. A refused TPM command is still a well-delivered
+response carrying a non-zero `responseCode`, so the refusal MUST be established by parsing
+that response — a check of the transport alone reads every refusal as a success, in the
+dangerous direction.
+
+**Bounded, named limitation.** The wrap/unwrap path of the macOS and Linux providers has been
+proven by CI compilation and by their tests through the `HardwareProvider` seam, **not** on
+real silicon: no Mac and no TPM-bearing Linux host was available. The outstanding evidence for
+each is a single `cargo run --example tpm-report` on such a host reporting
+`probe = Available(...)`, `custody = NonExportable` recorded only after a refused export, and
+`rung = hardware-bound`. Until that is produced, a host that reaches rung 1 on either platform
+is exercising a path no test has observed; a host that does not is exercising the degrade path,
+which is covered.
 
 A caller that supplies no provider resolves `Software(NotRequested)`: honest, and explicitly
 not a claim of hardware protection.
@@ -1314,6 +1370,7 @@ it.
 | C-43 | The caller's policy governs EVERY resolution of the selected provider, including a re-resolution performed by the constructed backend; a permissive policy is confined to the per-candidate scan | §17.5d |
 | C-44 | `Required` refuses `PlatformUnsupported`; `Preferred` opens on it, because it is deterministic for a build and platform and cannot transiently strip protection | §17.5f |
 | C-45 | A recovered content key is held in memory that is wiped on drop, over the full allocated capacity, on every exit path including a wrong-length refusal | §12 |
+| C-46 | Every provider classifies an inspected non-usability as `Absent` and an inability to inspect as `Indeterminate`; a wrong-length recovery is a refusal rather than a content key | §17.5 |
 
 Test evidence: `src/hardware/tests.rs` (tier resolution, fail-closed policy, cross-device
 binding, envelope codec) and `tests/hardware_v1_compat.rs` (committed golden v1 blobs
@@ -1324,6 +1381,12 @@ two asserting binding, because a refusal-only set is equally satisfied by an imp
 refuses honest hardware. C-45 is a memory-hygiene property with no direct test: it is enforced by
 construction (`Zeroizing` from the point of allocation) rather than asserted, since observing
 freed heap from a test is not reliably possible.
+
+C-46 is evidenced in the `hardware/` member by `platform/linux/tests.rs` — which drives all
+three classification arms with real directories and a real device file, never a stand-in that
+answers TPM commands — and by `platform/content_key.rs`, which pins the length bound from both
+sides, since a truncating implementation passes an under-length test and a padding one passes
+an over-length test.
 
 C-40..C-42 are evidenced in the `hardware/` member: `src/ladder/tests.rs` (precedence,
 fall-through, first-proven selection), `src/tests.rs` (the settled reason surviving the

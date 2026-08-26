@@ -13,18 +13,19 @@
 //! few dozen lines of FFI instead of a second envelope format, and every
 //! platform shares one audited AEAD path.
 //!
-//! # Where implementations will live
+//! # Where implementations live
 //!
-//! **No platform provider ships yet** — this release contains the trait and the
-//! envelope, and nothing that binds to real hardware. Passing no provider
-//! resolves [`Software(NotRequested)`](super::DegradeReason::NotRequested).
+//! Not in this package. It sets `unsafe_code = "forbid"` as a spec-pinned
+//! security property (`SPEC.md` §12/§13.2, conformance C-15), and every platform
+//! trusted-component API is FFI — so the bindings live in the
+//! `dig-keystore-hardware` workspace member under `hardware/`, mirroring the
+//! `wasm/` split, and reach this crate only through this trait. Windows (CNG),
+//! macOS on Apple silicon (Secure Enclave) and Linux (TPM 2.0) are implemented
+//! there.
 //!
-//! This package sets `unsafe_code = "forbid"` as a spec-pinned security property
-//! (`SPEC.md` §12/§13.2, conformance C-15), so raw CNG / Security Framework FFI
-//! cannot live here. Real bindings are therefore *planned* for a separate
-//! `hardware/` workspace member (`dig-keystore-hardware`) that will mirror the
-//! existing `wasm/` split, tracked as **dig_ecosystem #1693**; they will be
-//! injected through this trait.
+//! Passing no provider resolves
+//! [`Software(NotRequested)`](super::DegradeReason::NotRequested): honest, and
+//! explicitly not a claim of hardware protection.
 
 use zeroize::Zeroizing;
 

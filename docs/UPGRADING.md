@@ -8,6 +8,71 @@ git-cliff on every release (`--output CHANGELOG.md`, `release.yml`), so a note a
 there by hand is overwritten by the next release; the changelog header links here
 instead.
 
+## 0.13.0
+
+### macOS and Linux can now reach the hardware tier — and can now fail closed
+
+`dig-keystore-hardware` 0.2.0 binds the Apple Secure Enclave (on Apple silicon) and the Linux
+TPM 2.0. Until now both platforms reported `PlatformUnsupported`, which degrades under every
+policy except `Required`, so `bind_strongest` could not fail on them for hardware reasons.
+
+Two consequences to know about:
+
+- **`HardwarePolicy::Required` may now succeed** on those hosts, where it previously always
+  refused. That is the point of the change.
+- **`HardwarePolicy::Preferred` — the default — may now refuse.** A host whose trusted
+  component is present and answering but cannot be used, and which therefore probes
+  `Indeterminate`, fails closed rather than degrading. A host with no usable component at all
+  probes `Absent` and still degrades exactly as before, which covers the ordinary cases: no
+  TPM, a TPM device this process may not open, a binary without the Secure Enclave
+  entitlement.
+
+**What to do.** Nothing, if you pass `Optional` or accept a degrade. If you rely on
+`Preferred` never erroring, handle `HardwareProbeIndeterminate`, or pass `Optional` and read
+`backend.tier()` yourself.
+
+An Intel Mac is unchanged: the Secure Enclave binding covers Apple silicon only, because a T2
+may or may not be present and nothing in this build can determine which. And the wrap/unwrap
+path on both new platforms has been proven by compilation and by the seam tests, **not** on
+real silicon — see `SPEC.md` §17.5 for the outstanding evidence.
+
+### `FileBackend::delete` and `::list` now refuse an uninspectable path
+
+Both used `Path::exists()`, which maps **every** error — an unreadable parent, a
+failing mount, an I/O fault — to `false`. So `delete` returned `Ok(())` for a blob it
+could not stat (a false assurance that key material is gone, from the crate's
+secure-erase path), and `list` returned an empty vec for a root it could not read
+(indistinguishable, to a caller enumerating identities, from a user who has no keys).
+
+Both now use the same link-preserving stat `exists` has used since 0.11.0: present →
+proceed, `NotFound` → the old answer, anything else → `Err`.
+
+**What to do.** If you call either on a path that might be unreadable, handle the new
+`Err`. Two behaviours are deliberately unchanged, so most callers need nothing:
+`delete` on a genuinely-absent key is still an idempotent `Ok(())`, and `list` on a
+root that does not exist yet is still `Ok([])` — a keystore nobody has created is
+legitimately empty. Only the *undeterminable* cases changed.
+
+### `Keystore::create` is exclusive under contention on an atomic backend
+
+`create` no longer probes for existence and then writes. It performs a single
+`write_new`, so two concurrent mints of the same key on `FileBackend` or
+`MemoryBackend` now resolve to exactly one winner, every loser receiving
+`AlreadyExists`. Previously both racers observed an absence, both sealed — with an
+Argon2id derivation between the check and the write — and the loser's blob replaced
+the winner's, leaving the winning caller holding a seed that no longer opens anything.
+
+**What to do.** Nothing, unless you mint concurrently against `OsKeychainBackend`,
+whose credential store has no create-if-absent primitive and reports
+`Exclusivity::BestEffort`. The residual race there is **not** closed by this change —
+`create` still mints, because refusing would make the OS credential store unable to
+hold a keystore at all — so serialise the mint yourself. `SPEC.md` §7.1 is normative.
+
+One visible timing change: a mint that collides now pays the Argon2id derivation
+before it reports `AlreadyExists`, because the collision is detected by the write
+rather than by a pre-check. The error is the same one, at the same call, and this is
+the cost of having a single authority on whether the key already existed.
+
 ## 0.11.0
 
 ### `KeychainBackend` gains a required `write_new`

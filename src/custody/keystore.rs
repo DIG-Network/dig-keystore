@@ -110,6 +110,23 @@ impl<K: KeyScheme> Keystore<K> {
     ///
     /// Fails with [`KeystoreError::AlreadyExists`] if a blob already exists at
     /// `path` — this refuses to silently overwrite an existing key.
+    ///
+    /// # Exclusivity under contention
+    ///
+    /// The refusal is carried by a single
+    /// [`write_new`](KeychainBackend::write_new), so on a backend reporting
+    /// [`Exclusivity::Atomic`](crate::backend::Exclusivity::Atomic) —
+    /// `FileBackend` and `MemoryBackend` — two concurrent mints of the same
+    /// path **cannot** both establish one: exactly one succeeds and the rest get
+    /// `AlreadyExists`, which a caller can adopt by loading what the winner
+    /// established.
+    ///
+    /// On a backend reporting
+    /// [`BestEffort`](crate::backend::Exclusivity::BestEffort) — today that is
+    /// `OsKeychainBackend`, whose credential store offers no create-if-absent
+    /// primitive — a residual race remains and is **not** closed by this method.
+    /// A caller minting concurrently against an OS credential store should
+    /// serialise the mint itself. See `SPEC.md` §7.1.
     pub fn create(
         backend: Arc<dyn KeychainBackend>,
         path: BackendKey,
@@ -138,10 +155,6 @@ impl<K: KeyScheme> Keystore<K> {
         kdf_params: KdfParams,
         rng: &mut R,
     ) -> Result<Self> {
-        if backend.exists(&path)? {
-            return Err(KeystoreError::AlreadyExists(path.as_str().to_string()));
-        }
-
         // Resolve the secret we are encrypting.
         let secret: Zeroizing<Vec<u8>> = match plaintext {
             Some(p) => {
@@ -191,7 +204,14 @@ impl<K: KeyScheme> Keystore<K> {
         );
 
         let file_bytes = encode_file(&header, &ciphertext_and_tag);
-        backend.write(&path, &file_bytes)?;
+        // `write_new`, never `write`: the single call carries the whole
+        // exclusivity guarantee. The check-then-write this replaced —
+        // `exists()` and then a replace-semantics `write` — held an
+        // Argon2id derivation between the observation and the act, so two
+        // racers routinely both observed an absence and both wrote, and the
+        // loser's blob landed on top of the winner's. Measured at 16 winners of
+        // 16 (`tests/mint_exclusivity.rs`).
+        backend.write_new(&path, &file_bytes)?;
 
         Ok(Self {
             backend,

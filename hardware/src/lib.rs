@@ -37,12 +37,21 @@
 //! | platform | status |
 //! |---|---|
 //! | Windows | **implemented** — TPM 2.0 through the CNG *Microsoft Platform Crypto Provider* ([`platform::windows`]) |
-//! | macOS | **not implemented** — reports [`PlatformUnsupported`](dig_keystore::hardware::DegradeReason::PlatformUnsupported) |
-//! | Linux | **not implemented** — reports [`PlatformUnsupported`](dig_keystore::hardware::DegradeReason::PlatformUnsupported) |
+//! | macOS on Apple silicon | **implemented** — Secure Enclave P-256 + ECIES ([`platform::macos`]) |
+//! | macOS on Intel | **not implemented** — a T2 may or may not be present and this build cannot tell |
+//! | Linux | **implemented** — TPM 2.0 over the kernel resource manager ([`platform::linux`]) |
 //!
 //! An unimplemented platform degrades to rung 2/3 and **says so with a reason
 //! naming this build**, never as `NoHardwarePresent`: that would be a confident
 //! claim about the machine, and nothing here inspected it.
+//!
+//! **What the two new providers have and have not been proven against.** Both
+//! compile under their target, and their classification, custody and refusal
+//! logic is tested through the [`HardwareProvider`] seam on every CI leg. Neither
+//! has run against real silicon — no Mac and no TPM-bearing Linux host was
+//! available — so the wrap/unwrap path on those two platforms is the one part of
+//! this crate that rests on the specification rather than on an observation. The
+//! outstanding evidence is named in `SPEC.md` §17.5.
 //!
 //! # Example
 //!

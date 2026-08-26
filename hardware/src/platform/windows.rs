@@ -42,10 +42,10 @@
 
 use std::fmt;
 
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use dig_keystore::hardware::{
-    ContentKey, HardwareKind, HardwareProbe, HardwareProvider, KeyCustody, CONTENT_KEY_LEN,
+    ContentKey, HardwareKind, HardwareProbe, HardwareProvider, KeyCustody,
 };
 use dig_keystore::{KeystoreError, Result};
 use windows::core::PCWSTR;
@@ -264,24 +264,8 @@ impl HardwareProvider for CngPlatformKeyProvider {
         let plain = oaep_transform(key, wrapped, Direction::Decrypt)
             .map_err(|detail| KeystoreError::HardwareUnwrapFailed { detail })?;
 
-        // A wrong-length recovery is a refusal, not a content key. Reporting it
-        // as one would hand `dig-keystore` bytes it would then use as an AES key.
-        let mut bytes: [u8; CONTENT_KEY_LEN] =
-            plain
-                .as_slice()
-                .try_into()
-                .map_err(|_| KeystoreError::HardwareUnwrapFailed {
-                    detail: format!(
-                        "TPM returned {} bytes, expected {CONTENT_KEY_LEN}",
-                        plain.len()
-                    ),
-                })?;
-
-        // `ContentKey` owns a copy from here on; this stack copy is wiped rather
-        // than left for the next frame to reuse. `plain` wipes itself on drop.
-        let content_key = ContentKey::new(bytes);
-        bytes.zeroize();
-        Ok(content_key)
+        super::content_key::from_recovered(&plain, "the TPM")
+            .map_err(|detail| KeystoreError::HardwareUnwrapFailed { detail })
     }
 }
 
@@ -537,6 +521,7 @@ fn hresult_code(e: &windows::core::Error) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dig_keystore::hardware::CONTENT_KEY_LEN;
 
     /// **Property:** only `NTE_NOT_FOUND` is treated as a confident absence.
     ///

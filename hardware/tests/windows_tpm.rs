@@ -35,30 +35,57 @@
 /// A crate-level `#![cfg(target_os = "windows")]` would compile the whole file
 /// away elsewhere, and an empty test binary still prints `ok` — which is
 /// indistinguishable from "the hardware assertions passed". This test states
-/// which it is.
+/// which it is, and then asserts the one property that binds on **every** host:
+/// a strict policy never settles for software.
+///
+/// **The branch is taken on `unsupported_reason`, not on the target.** It used
+/// to read `if !cfg!(target_os = "windows")` and assert that no hardware tier
+/// was claimable, on the premise that only Windows had a binding. That premise
+/// expired the moment the macOS and Linux providers landed, and a test asserting
+/// an expired premise fails on exactly the hosts the new code was written for.
 #[test]
-fn hardware_assertions_apply_on_windows_only() {
+fn every_platform_answers_the_tier_question_honestly() {
+    use dig_keystore::hardware::HardwarePolicy;
+
     if cfg!(target_os = "windows") {
         eprintln!("Windows host: the TPM assertions in this file are live.");
         eprintln!("They are BINDING only under DIG_KEYSTORE_REQUIRE_TPM=1.");
     } else {
-        eprintln!("NOT A WINDOWS HOST: every TPM assertion here is compiled out.");
+        eprintln!("NOT A WINDOWS HOST: every CNG assertion here is compiled out.");
         eprintln!("This binary passing says NOTHING about the CNG provider.");
     }
 
-    // Whatever the platform, the crate must still answer the tier question, and
-    // must never claim hardware it has not proven.
+    // Whatever the platform, the crate must answer the tier question, and must
+    // never claim hardware it has not proven.
     let backend = dig_keystore_hardware::bind_strongest(
         dig_keystore::testing::MemoryBackend::new(),
-        dig_keystore::hardware::HardwarePolicy::Optional,
+        HardwarePolicy::Optional,
     )
     .expect("Optional always opens, on every platform");
 
-    if !cfg!(target_os = "windows") {
+    let unsupported = dig_keystore_hardware::platform::unsupported_reason();
+    if unsupported.is_some() {
         assert!(
             !backend.tier().is_hardware_bound(),
-            "no provider is compiled for this platform, so no hardware tier is claimable"
+            "this build has no provider for this platform, so no hardware tier is claimable"
         );
+    }
+
+    // The property that binds everywhere, and the one a dropped policy argument
+    // breaks: `Required` must either PROVE a hardware tier or refuse. Returning
+    // a software tier under it — which is what happens when the policy is not
+    // applied to the degrade path — hands a caller who demanded hardware a
+    // keystore portable to any machine, with no error anywhere.
+    match dig_keystore_hardware::bind_strongest(
+        dig_keystore::testing::MemoryBackend::new(),
+        HardwarePolicy::Required,
+    ) {
+        Ok(required) => assert!(
+            required.tier().is_hardware_bound(),
+            "Required returned a software tier instead of refusing: {:?}",
+            required.tier()
+        ),
+        Err(refused) => eprintln!("Required correctly refused this host: {refused}"),
     }
 }
 
