@@ -8,6 +8,11 @@ Behaviour changes that need action on upgrade are recorded in
 [docs/UPGRADING.md](docs/UPGRADING.md).
 
 
+## [0.13.0] - 2026-08-26
+
+### Features
+- **hardware:** Platform providers, an atomic mint, and three-valued presence reads (#23)
+
 ## [0.12.0] - 2026-08-25
 
 ### Features
