@@ -1102,12 +1102,24 @@ fail into exactly one of two answers, by this rule:
 > `Absent`; the inspection itself could not complete or could not be believed →
 > `Indeterminate`.
 
-Both halves are load-bearing. Reporting an inspected non-usability — a TPM device node owned
-by a group this process is not in, a binary carrying no Secure Enclave entitlement — as
-`Indeterminate` makes an ordinary host fail closed under any policy stricter than `Optional`
-and unable to open its own keystore, when the correct outcome is a degrade to a fully sealed
+Both halves are load-bearing. Reporting an inspected non-usability as `Indeterminate` makes an
+ordinary host fail closed under any policy stricter than `Optional` and unable to open its own
+keystore — the refusal occurs when the backend is CONSTRUCTED, so it gates loading an existing
+keystore and not merely minting one — when the correct outcome is a degrade to a fully sealed
 software blob. Reporting an inability to inspect as `Absent` is the confident lie about the
 machine that the clause below forbids.
+
+**A refusal carrying a response code is an ANSWER, not a silence (normative).** Where the
+platform reports a distinguishable code, an implementation MUST classify by it rather than by
+the fact that a call failed. On Linux the wrapping key is created against the owner hierarchy
+with an empty password authorisation, so a hierarchy carrying an authValue
+(`tpm2_changeauth -c owner`, enterprise imaging, a Windows install that took ownership), a
+disabled hierarchy, or dictionary-attack lockout all answer with a non-zero response code;
+each is `Absent`. A transient code — the TPM not yet ready, exhausted object or session memory
+— and any unrecognised code remain `Indeterminate`, so the set treated as a confident absence
+MUST be enumerated by name and MUST NOT be a range. A format-one response code carries the
+offending handle, session or parameter index in bits 8 to 11, and an implementation MUST strip
+those before comparing, or the classification will match in a test and never on a device.
 
 **Custody MUST be recorded from a refusal, never from a request (normative).** A provider
 claims `NonExportable` only after the platform has refused a real export attempt:

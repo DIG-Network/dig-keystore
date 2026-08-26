@@ -89,7 +89,21 @@ impl TpmSession {
         let response = transact_on(&mut device, &tpm2::create_primary_command())
             .map_err(|e| Unavailable::NotInspectable(format!("the TPM did not answer: {e}")))?;
         let handle = tpm2::parse_create_primary_response(&response).map_err(|e| {
-            Unavailable::NotInspectable(format!("could not create a TPM wrapping key: {e}"))
+            let detail = format!("could not create a TPM wrapping key: {e}");
+            // The response CODE is the discriminator, and discarding it here was
+            // a defect rather than a simplification. This command authorises
+            // against the owner hierarchy with an empty password, so a host whose
+            // hierarchy carries an authValue, or which is in lockout, answers
+            // with a refusal — an INSPECTED non-usability, which C-46 classifies
+            // `Absent` so the host degrades to the software floor. Reported as
+            // `Indeterminate` it dominates the ladder and refuses to construct
+            // the backend under the default policy, locking the user out of
+            // LOADING an existing keystore.
+            if tpm2::is_confident_absence(e.rc) {
+                Unavailable::NotUsable(detail)
+            } else {
+                Unavailable::NotInspectable(detail)
+            }
         })?;
 
         Ok(Self {

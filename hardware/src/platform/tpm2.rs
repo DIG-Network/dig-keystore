@@ -338,6 +338,83 @@ fn read_tpm2b(body: &[u8], offset: usize) -> Result<&[u8], TpmError> {
     })
 }
 
+/// Response codes meaning the owner hierarchy is not usable by this process.
+///
+/// `fixedTPM`-style constants rather than a comment, because each one is a
+/// deliberate decision about a HOST, not a formatting detail.
+///
+/// - `TPM_RC_HIERARCHY` / `TPM_RC_DISABLED`: the owner hierarchy is turned off.
+/// - `TPM_RC_AUTH_FAIL` / `TPM_RC_BAD_AUTH` / `TPM_RC_AUTH_MISSING`: the
+///   hierarchy carries an authValue this process does not hold. Ordinary on an
+///   enterprise-imaged host, after `tpm2_changeauth -c owner`, or alongside a
+///   Windows install that took ownership.
+/// - `TPM_RC_LOCKOUT`: dictionary-attack lockout is active, so the TPM refuses
+///   authorised use until it clears.
+const TPM_RC_HIERARCHY: u32 = 0x085;
+const TPM_RC_AUTH_FAIL: u32 = 0x08E;
+const TPM_RC_BAD_AUTH: u32 = 0x0A2;
+const TPM_RC_DISABLED: u32 = 0x120;
+const TPM_RC_AUTH_MISSING: u32 = 0x125;
+const TPM_RC_LOCKOUT: u32 = 0x921;
+
+/// Whether a response code is a **confident** statement that this process has no
+/// usable TPM, as opposed to an inability to determine anything.
+///
+/// This is the TPM half of the rule stated in [`super`] and made normative as
+/// C-46: *inspected and unusable by this process* is `Absent`; *could not
+/// inspect at all* is `Indeterminate`. A response code means the device was
+/// reached, understood the command, and said no — an answer, not a silence.
+///
+/// **The set is deliberately small and everything else stays indeterminate**,
+/// exactly as on the other two platforms. The two directions fail very
+/// differently and both matter:
+///
+/// - Too NARROW and an ordinary host — an owner hierarchy with a password, a
+///   TPM in lockout — is reported as uninspectable, which under any policy
+///   stricter than `Optional` refuses to construct the backend at all. That
+///   locks the user out of **loading** an existing keystore, not merely minting
+///   one.
+/// - Too WIDE and a TPM that was merely busy, or that failed in a way nobody
+///   anticipated, is reported as absent, and a host with working hardware
+///   silently drops to the software floor.
+///
+/// So a transient or unrecognised code is an uncertainty and fails closed.
+pub fn is_confident_absence(rc: Option<u32>) -> bool {
+    let Some(rc) = rc else {
+        // No code at all means the failure was the transport or the framing, not
+        // the TPM's answer. Nothing was established about the host.
+        return false;
+    };
+    matches!(
+        canonical_rc(rc),
+        TPM_RC_HIERARCHY
+            | TPM_RC_AUTH_FAIL
+            | TPM_RC_BAD_AUTH
+            | TPM_RC_DISABLED
+            | TPM_RC_AUTH_MISSING
+            | TPM_RC_LOCKOUT
+    )
+}
+
+/// Strip the positional bits a TPM adds to a response code, leaving the error
+/// itself.
+///
+/// A **format-one** code — bit 7 set — carries which handle, session or
+/// parameter was at fault in bits 8 to 11, so `TPM_RC_BAD_AUTH` on the first
+/// handle arrives as `0x1A2` rather than `0x0A2`. Comparing the raw value
+/// against a bare constant therefore misses the code on every real device, which
+/// would leave the classification correct only in a test. A **format-zero** code
+/// carries no such index and is compared whole.
+fn canonical_rc(rc: u32) -> u32 {
+    const FORMAT_ONE: u32 = 0x080;
+    if rc & FORMAT_ONE != 0 {
+        // Keep the format bit and the six-bit error number; discard the index.
+        rc & 0x0BF
+    } else {
+        rc & 0xFFF
+    }
+}
+
 /// Whether the TPM accepted a command, discarding any parameters it returned.
 ///
 /// The caller that matters is the export-refusal probe: a refused command is

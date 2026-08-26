@@ -172,6 +172,98 @@ fn every_command_declares_its_own_length_and_the_right_tag() {
     }
 }
 
+/// **Proves:** an authorization or hierarchy refusal is a confident absence, a
+/// transient or unrecognised code is not, and a failure with no code at all is
+/// not.
+///
+/// **Why it matters:** this predicate decides whether a Linux host DEGRADES to
+/// the software floor or REFUSES to construct a keystore backend at all. Both
+/// mistakes are real and they are opposites — too narrow locks a user out of
+/// loading their own keystore on an ordinary owner-password host; too wide drops
+/// a host with working hardware to software without saying so.
+///
+/// **The transient control is the discriminating one.** `TPM_RC_RETRY`
+/// (`0x922`) sits one value above `TPM_RC_LOCKOUT` (`0x921`), so a fix that
+/// widened by range rather than by name — or that treated any response code as
+/// an answer — passes an absence-only test and fails this.
+#[test]
+fn only_an_authorization_or_hierarchy_refusal_is_a_confident_absence() {
+    for (rc, name) in [
+        (TPM_RC_HIERARCHY, "TPM_RC_HIERARCHY"),
+        (TPM_RC_AUTH_FAIL, "TPM_RC_AUTH_FAIL"),
+        (TPM_RC_BAD_AUTH, "TPM_RC_BAD_AUTH"),
+        (TPM_RC_DISABLED, "TPM_RC_DISABLED"),
+        (TPM_RC_AUTH_MISSING, "TPM_RC_AUTH_MISSING"),
+        (TPM_RC_LOCKOUT, "TPM_RC_LOCKOUT"),
+    ] {
+        assert!(
+            is_confident_absence(Some(rc)),
+            "{name} is the TPM answering that this process may not use it"
+        );
+    }
+
+    for (rc, name) in [
+        (0x922u32, "TPM_RC_RETRY: the TPM could not answer YET"),
+        (
+            0x902,
+            "TPM_RC_OBJECT_MEMORY: no room for a transient object",
+        ),
+        (0x903, "TPM_RC_SESSION_MEMORY"),
+        (0x923, "TPM_RC_NV_UNAVAILABLE"),
+        (0x101, "TPM_RC_FAILURE: the TPM is in a bad state"),
+        (0x100, "TPM_RC_INITIALIZE: not started up"),
+        (0x084, "TPM_RC_VALUE: we sent something wrong"),
+        (0x000, "success is not an absence"),
+    ] {
+        assert!(
+            !is_confident_absence(Some(rc)),
+            "{name} establishes nothing about the host and must fail closed"
+        );
+    }
+
+    assert!(
+        !is_confident_absence(None),
+        "a transport or framing failure is not the TPM answering"
+    );
+}
+
+/// **Proves:** a format-one code is recognised with its positional bits set, as
+/// a real device sends it — and that stripping them cannot swallow an unrelated
+/// code.
+///
+/// **Why it matters:** a TPM reports which handle, session or parameter was at
+/// fault in bits 8 to 11 of a format-one response code, so `TPM_RC_BAD_AUTH` on
+/// the first handle arrives as `0x1A2`, never the bare `0x0A2`. A classifier
+/// comparing raw values matches the constant in a test and **nothing on real
+/// hardware** — the classification would be correct only where it is never
+/// needed. This is the single most likely way for this fix to be silently
+/// inert on the machines it exists for.
+///
+/// **The negative arm is load-bearing:** masking must not be so aggressive that
+/// a format-zero code lands on a format-one constant.
+#[test]
+fn a_format_one_code_is_recognised_with_its_positional_bits() {
+    // Handle 1, session 2, parameter 3 — the shapes a device actually emits.
+    for decorated in [0x0A2u32, 0x1A2, 0x2A2, 0x3A2, 0x9A2] {
+        assert!(
+            is_confident_absence(Some(decorated)),
+            "TPM_RC_BAD_AUTH must be recognised as 0x{decorated:03X}, the form a device sends"
+        );
+    }
+    for decorated in [0x08E, 0x18E, 0x38E] {
+        assert!(is_confident_absence(Some(decorated)), "TPM_RC_AUTH_FAIL");
+    }
+
+    // TPM_RC_VALUE is format one too, and is NOT an absence however it is
+    // decorated: it means the command was wrong, not that the host is unusable.
+    for decorated in [0x084u32, 0x184, 0x284] {
+        assert!(
+            !is_confident_absence(Some(decorated)),
+            "0x{decorated:03X} is our own bad command, not a statement about the host"
+        );
+    }
+}
+
 /// Build a well-formed response: header with a correct size, then `body`.
 fn response(tag: u16, rc: u32, body: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();

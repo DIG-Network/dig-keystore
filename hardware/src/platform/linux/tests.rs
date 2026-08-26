@@ -11,6 +11,7 @@
 //! prove — see the residual evidence named in `SPEC.md` §17.5.
 
 use super::*;
+use crate::platform::tpm2;
 use dig_keystore::hardware::CONTENT_KEY_LEN;
 use tempfile::TempDir;
 
@@ -149,6 +150,93 @@ fn each_unavailability_class_renders_its_own_reason() {
     );
     // Both variants render, because an operator reading only one of them cannot
     // tell an expected degrade from a broken machine.
+}
+
+/// A device file that answers the FIRST command written to it with `response`.
+///
+/// The device is opened read-write at offset zero, so `write_all` overwrites the
+/// leading bytes and leaves the read position just past the command. Padding the
+/// file with exactly one command's worth of filler therefore puts `response`
+/// where the subsequent read lands.
+///
+/// **This is not a TPM and cannot become one.** It answers exactly one canned
+/// message and every message it is used to send here is a REFUSAL. A fixture
+/// that answered `CreatePrimary` affirmatively would manufacture a key handle
+/// and let the suite report a wrap capability nobody has observed on silicon —
+/// see the module docs. Refusals only.
+fn device_answering(dir: &TempDir, response: &[u8]) -> std::path::PathBuf {
+    let path = dir.path().join("tpmrm0");
+    let mut contents = vec![0u8; tpm2::create_primary_command().len()];
+    contents.extend_from_slice(response);
+    std::fs::write(&path, contents).unwrap();
+    path
+}
+
+/// A well-formed, unsessioned TPM response carrying `rc` and no parameters.
+fn refusal(rc: u32) -> Vec<u8> {
+    let mut out = 0x8001u16.to_be_bytes().to_vec();
+    out.extend_from_slice(&10u32.to_be_bytes());
+    out.extend_from_slice(&rc.to_be_bytes());
+    out
+}
+
+/// **Proves:** a TPM that answers `CreatePrimary` with an **authorization**
+/// refusal is a confident `Absent`, while one that answers with a **transient**
+/// refusal stays `Indeterminate`.
+///
+/// **Why it matters — this is a lockout, not a cosmetic misclassification.**
+/// `create_primary_command` authorises against `TPM_RH_OWNER` with an empty
+/// password. On a host whose owner hierarchy carries an authValue — enterprise
+/// imaging, `tpm2_changeauth -c owner`, a Windows dual-boot — or which is in DA
+/// lockout, the TPM answers with a non-zero response code. Classified
+/// `Indeterminate`, that reason dominates the ladder, `degrade_under` errors
+/// under the `#[default]` `Preferred` policy, and `HardwareBoundBackend` cannot
+/// be constructed at all — so the user cannot **LOAD** an existing keystore,
+/// not merely mint one. Those hosts opened at the software tier before the Linux
+/// binding existed, so reading this as an uncertainty is a regression.
+///
+/// The answer is not an uncertainty: the TPM was reached, it understood the
+/// command, and it said no. That is an **inspected** non-usability, which C-46
+/// (`SPEC.md` §17.5) classifies `Absent` — degrade to the fully sealed software
+/// floor, which is exactly what those hosts had before.
+///
+/// **The transient control is what keeps the fix one-sided.** `TPM_RC_RETRY`
+/// (`0x922`) sits one value above `TPM_RC_LOCKOUT` (`0x921`) and means the TPM
+/// could not answer *yet*. A fix that mapped every response code to `Absent`
+/// would silently degrade a host whose TPM was merely busy — the failure
+/// direction the fail-closed doctrine exists for — and this control fails it.
+///
+/// **Asserted through `detect_at`, not through the classifier**, because the
+/// defect is a placement: the response code reaches `establish` and is discarded
+/// there. A classifier proven in isolation would stay green with the discard
+/// still in place.
+#[test]
+fn an_authorization_refusal_is_absent_and_a_transient_refusal_is_indeterminate() {
+    let sysfs = sysfs_with_a_chip();
+
+    // TPM_RC_BAD_AUTH: the owner hierarchy has an authValue this process does
+    // not hold. The host was inspected; it offers no TPM this process can use.
+    let denied = TempDir::new().unwrap();
+    device_answering(&denied, &refusal(0x0A2));
+    let provider = LinuxTpmProvider::detect_at(sysfs.path(), denied.path());
+    assert_eq!(
+        provider.probe(),
+        HardwareProbe::Absent,
+        "an authorization refusal is an answer, not a failure to inspect: {provider:?}"
+    );
+
+    // TPM_RC_RETRY: the TPM could not answer yet. Nothing was established about
+    // the host, so this must still fail closed.
+    let busy = TempDir::new().unwrap();
+    device_answering(&busy, &refusal(0x922));
+    let provider = LinuxTpmProvider::detect_at(sysfs.path(), busy.path());
+    assert!(
+        matches!(provider.probe(), HardwareProbe::Indeterminate { .. }),
+        "a transient refusal establishes nothing and must stay indeterminate: {provider:?}"
+    );
+
+    // Neither earns a custody claim: no key was established in either case.
+    assert_eq!(provider.custody(), KeyCustody::ProcessMemory);
 }
 
 /// **Proves:** the fallback constructors never claim hardware custody.

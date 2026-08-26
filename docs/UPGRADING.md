@@ -20,12 +20,21 @@ Two consequences to know about:
 
 - **`HardwarePolicy::Required` may now succeed** on those hosts, where it previously always
   refused. That is the point of the change.
-- **`HardwarePolicy::Preferred` — the default — may now refuse.** A host whose trusted
-  component is present and answering but cannot be used, and which therefore probes
-  `Indeterminate`, fails closed rather than degrading. A host with no usable component at all
-  probes `Absent` and still degrades exactly as before, which covers the ordinary cases: no
-  TPM, a TPM device this process may not open, a binary without the Secure Enclave
-  entitlement.
+- **`HardwarePolicy::Preferred` — the default — may now refuse**, but only where the host
+  could not be inspected at all: a TPM that will not answer, that answers unintelligibly, or
+  that reports a transient condition such as `TPM_RC_RETRY` or exhausted object memory.
+  Nothing is known about such a host, so it fails closed.
+
+  **A host that was inspected and simply has no trusted component this process can use still
+  degrades exactly as before**, and that covers every ordinary case: no TPM at all, a TPM
+  device node owned by a group this process is not in, an owner hierarchy carrying a password
+  this process does not hold (`tpm2_changeauth -c owner`, enterprise imaging, a Windows
+  install that took ownership), a TPM in dictionary-attack lockout, and a binary without the
+  Secure Enclave entitlement. Those probe `Absent` and open at the software floor.
+
+  The distinction is `SPEC.md` §17.5 / C-46, and it is the difference between a degrade and
+  being unable to **load** an existing keystore — the refusal happens when the backend is
+  constructed, so it gates opening a keystore, not merely minting one.
 
 **What to do.** Nothing, if you pass `Optional` or accept a degrade. If you rely on
 `Preferred` never erroring, handle `HardwareProbeIndeterminate`, or pass `Optional` and read
