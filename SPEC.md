@@ -1109,9 +1109,12 @@ keystore and not merely minting one — when the correct outcome is a degrade to
 software blob. Reporting an inability to inspect as `Absent` is the confident lie about the
 machine that the clause below forbids.
 
-**A refusal carrying a response code is an ANSWER, not a silence (normative).** Where the
-platform reports a distinguishable code, an implementation MUST classify by it rather than by
-the fact that a call failed. On Linux the wrapping key is created against the owner hierarchy
+**A refusal carrying a RECOGNISED response code is an ANSWER, not a silence (normative).** Where the
+platform reports a code the implementation **recognises**, it MUST classify by that code rather
+than by the bare fact that a call failed. The qualifier is load-bearing: read without it, this
+clause licenses treating *any* response code as a confident answer, which is the silent-downgrade
+direction §17.5d forbids — an unrecognised code means the platform said something this build
+cannot interpret, which is an uncertainty and not an absence. On Linux the wrapping key is created against the owner hierarchy
 with an empty password authorisation, so a hierarchy carrying an authValue
 (`tpm2_changeauth -c owner`, enterprise imaging, a Windows install that took ownership), a
 disabled hierarchy, or dictionary-attack lockout all answer with a non-zero response code;
@@ -1188,6 +1191,21 @@ the per-candidate SCAN, where strictness would abandon a working candidate for a
 one's failure. Step 6 governs the resolution of the candidate that WON, where permissiveness
 discards the caller's requirement. The permissive judgement is confined to choosing; the
 caller's policy governs every claim that reaches the caller.
+
+**Why a provider's probe classification is a custody-severity decision, in BOTH directions.**
+Step 4's precedence is invisible from inside a provider, and it makes each of the two possible
+misclassifications severe in an opposite way. Over-classifying as `ProbeIndeterminate` is a
+**keystore-load outage**: the reason dominates every other, `Preferred` refuses, and the backend
+cannot be constructed at all — so the user cannot open an EXISTING keystore, not merely mint a
+new one. Over-classifying as `NoHardwarePresent` is a **silent downgrade**: a host with working
+hardware settles at the software tier and reports a confident absence, which is the one claim
+nothing downstream re-checks.
+
+Neither direction is the safe default, so the rule between them is not a preference and MUST NOT
+be resolved by leaning either way: a **recognised** platform answer is an answer and classifies
+confidently; anything else — unrecognised, transient, or a failure with no platform code at all
+— fails closed as `ProbeIndeterminate`. This is C-46, and the set a provider treats as a
+confident answer is therefore enumerated by name (§17.5), never widened to avoid the outage.
 
 #### 17.5e Non-exportability is asserted, not declared (normative)
 

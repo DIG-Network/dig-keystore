@@ -214,10 +214,13 @@ fn refusal(rc: u32) -> Vec<u8> {
 fn an_authorization_refusal_is_absent_and_a_transient_refusal_is_indeterminate() {
     let sysfs = sysfs_with_a_chip();
 
-    // TPM_RC_BAD_AUTH: the owner hierarchy has an authValue this process does
-    // not hold. The host was inspected; it offers no TPM this process can use.
+    // TPM_RC_BAD_AUTH on handle 1 — `0x1A2`, the DECORATED form a real device
+    // sends, not the bare constant. A format-one code carries the offending
+    // handle in bits 8-11, so a classifier comparing raw values matches the
+    // constant in a unit test and nothing on hardware; driving the decorated
+    // form through the whole path is what makes this test able to see that.
     let denied = TempDir::new().unwrap();
-    device_answering(&denied, &refusal(0x0A2));
+    device_answering(&denied, &refusal(0x1A2));
     let provider = LinuxTpmProvider::detect_at(sysfs.path(), denied.path());
     assert_eq!(
         provider.probe(),
