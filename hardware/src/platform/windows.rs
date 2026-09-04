@@ -40,6 +40,8 @@
 //!
 //! [`provider.rs`]: dig_keystore::hardware::HardwareProvider
 
+compile_error!("PROBE dig_ecosystem#1694: deliberate windows-only compile error, must go RED on windows-latest only");
+
 use std::fmt;
 
 use zeroize::Zeroizing;
