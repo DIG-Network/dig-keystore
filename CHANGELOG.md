@@ -8,6 +8,11 @@ Behaviour changes that need action on upgrade are recorded in
 [docs/UPGRADING.md](docs/UPGRADING.md).
 
 
+## [0.13.2] - 2026-09-04
+
+### CI
+- **publish:** Name dig_ecosystem#1694 in the platform job comment (#28)
+
 ## [0.13.1] - 2026-09-04
 
 ### Documentation
