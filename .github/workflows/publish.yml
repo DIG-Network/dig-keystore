@@ -143,7 +143,8 @@ jobs:
   # #1693) from being added at all.
   #
   # This job is the narrow fix: build and test the platform-gated code on the
-  # platforms that have it. Coverage stays on ubuntu — running it three times
+  # platforms that have it — this is the runner provisioning dig_ecosystem
+  # #1694 asked for. Coverage stays on ubuntu — running it three times
   # measures the same lines, and the floor is a property of the crate, not of
   # the runner.
   platform:
