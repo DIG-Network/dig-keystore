@@ -49,8 +49,6 @@
 //! conformance C-15), so this crate exists to keep that forbid intact in the
 //! crate that actually holds key material.
 
-compile_error!("PROBE dig_ecosystem#1694: deliberate macos-only compile error, must go RED on macos-latest only");
-
 use std::fmt;
 
 use core_foundation::base::{CFType, TCFType};
